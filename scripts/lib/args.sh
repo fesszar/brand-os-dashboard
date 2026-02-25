@@ -4,11 +4,14 @@
 # Dependencies: constants.sh
 
 # Parse command line arguments
-# Sets: MAX_ITERATIONS, ONCE_FLAG
+# Sets: MAX_ITERATIONS, ONCE_FLAG, RUNNER_MODE, AGENT_ENGINE, MODEL_NAME
 # Usage: parse_arguments "$@"
 parse_arguments() {
   MAX_ITERATIONS=10
   ONCE_FLAG=false
+  RUNNER_MODE="${RALPH_RUNNER:-auto}"   # auto|docker|local
+  AGENT_ENGINE="${RALPH_AGENT_ENGINE:-claude}" # claude|codex|gemini
+  MODEL_NAME="${RALPH_MODEL:-opus}"
 
   while [[ $# -gt 0 ]]; do
     case $1 in
@@ -25,6 +28,30 @@ parse_arguments() {
         ;;
       --max-iterations=*)
         MAX_ITERATIONS="${1#*=}"
+        shift
+        ;;
+      --runner|-r)
+        RUNNER_MODE="$2"
+        shift 2
+        ;;
+      --runner=*)
+        RUNNER_MODE="${1#*=}"
+        shift
+        ;;
+      --agent|-a)
+        AGENT_ENGINE="$2"
+        shift 2
+        ;;
+      --agent=*)
+        AGENT_ENGINE="${1#*=}"
+        shift
+        ;;
+      --model|-m)
+        MODEL_NAME="$2"
+        shift 2
+        ;;
+      --model=*)
+        MODEL_NAME="${1#*=}"
         shift
         ;;
       [0-9]*)

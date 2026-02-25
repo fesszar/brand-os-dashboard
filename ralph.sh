@@ -47,7 +47,7 @@ FULL_OUTPUT_FILE=""
 trap cleanup EXIT
 trap handle_interrupt INT
 
-# Parse arguments (sets MAX_ITERATIONS, ONCE_FLAG)
+# Parse arguments (sets MAX_ITERATIONS, ONCE_FLAG, RUNNER_MODE, AGENT_ENGINE, MODEL_NAME)
 parse_arguments "$@"
 
 # Initialize progress file if it doesn't exist
@@ -62,10 +62,32 @@ check_git_repo
 check_required_files
 check_history_dir
 check_ansi_support
+resolve_runner_mode
+validate_runner_prereqs
 
 show_ralph
 echo -e " ${C}Starting Ralph${R} ・ ${Y}v$VERSION${R} ・ Max iterations: ${Y}$MAX_ITERATIONS${R}"
+echo -e " ${C}Runner:${R} ${Y}$RESOLVED_RUNNER${R} ・ ${C}Engine:${R} ${Y}$AGENT_ENGINE${R} ・ ${C}Model:${R} ${Y}$MODEL_NAME${R}"
 echo ""
+
+# Build the local runner command string based on selected engine/model.
+build_local_agent_command() {
+  case "$AGENT_ENGINE" in
+    claude)
+      echo "claude --model \"$MODEL_NAME\" --output-format stream-json --verbose -p \"\$PROMPT_CONTENT\""
+      ;;
+    codex)
+      echo "codex exec --full-auto --json --model \"$MODEL_NAME\" \"\$PROMPT_CONTENT\""
+      ;;
+    gemini)
+      echo "gemini --yolo --output-format stream-json -m \"$MODEL_NAME\" -p \"\$PROMPT_CONTENT\""
+      ;;
+    *)
+      log_error "Unsupported local engine: $AGENT_ENGINE"
+      exit 1
+      ;;
+  esac
+}
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   ITERATION_START=$(date +%s)
@@ -93,12 +115,23 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
   OUTPUT_FILE=$(mktemp)
   FULL_OUTPUT_FILE=$(mktemp)
 
-  # Use script to provide pseudo-TTY for docker sandbox.
+  # Use script to provide pseudo-TTY for the selected runner.
   # This is the main command loop.
   export PROMPT_CONTENT
-  export DOCKER_DEFAULT_PLATFORM=linux/amd64 # Needed for Playwright.
+  AGENT_CMD=""
+  if [ "$RESOLVED_RUNNER" = "docker" ]; then
+    export DOCKER_DEFAULT_PLATFORM=linux/amd64 # Needed for Playwright.
+    TOKEN_TO_USE="${RALPH_CLAUDE_OAUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+    if [ -n "$TOKEN_TO_USE" ]; then
+      AGENT_CMD='CLAUDE_CODE_OAUTH_TOKEN="'"$TOKEN_TO_USE"'" docker sandbox run claude . -- --model '"$MODEL_NAME"' --output-format stream-json --verbose -p "$PROMPT_CONTENT"'
+    else
+      AGENT_CMD='docker sandbox run claude . -- --model '"$MODEL_NAME"' --output-format stream-json --verbose -p "$PROMPT_CONTENT"'
+    fi
+  else
+    AGENT_CMD="$(build_local_agent_command)"
+  fi
 
-  script -q "$OUTPUT_FILE" bash -c 'docker sandbox run claude . -- --model opus --output-format stream-json --verbose -p "$PROMPT_CONTENT"' >/dev/null 2>&1 &
+  script -q "$OUTPUT_FILE" bash -lc "$AGENT_CMD" >/dev/null 2>&1 &
   AGENT_PID=$!
 
   # Track position in output file for incremental reading
@@ -154,7 +187,7 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
   OUTPUT=$(cat "$FULL_OUTPUT_FILE" 2>/dev/null || cat "$OUTPUT_FILE")
 
   # Check for Docker daemon not ready error
-  if echo "$OUTPUT" | grep -q "docker daemon not ready"; then
+  if [ "$RESOLVED_RUNNER" = "docker" ] && echo "$OUTPUT" | grep -q "docker daemon not ready"; then
     stop_spinner
     clear_rolling_preview
     echo ""
@@ -167,16 +200,18 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
   fi
 
   # Check for invalid API key / authentication error
-  if echo "$OUTPUT" | grep -q "Invalid API key"; then
+  if echo "$OUTPUT" | grep -qiE "Invalid API key|authentication error|please authenticate|not logged in"; then
     stop_spinner
     clear_rolling_preview
     echo ""
     echo -e "${RD}░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒░░${R}"
     echo -e "  ❌ ${RD}Authentication Error${R}"
-    echo -e "  Invalid API key. Please authenticate inside the Docker sandbox."
+    echo -e "  Authentication failed for runner '$RESOLVED_RUNNER' (engine: $AGENT_ENGINE)."
     echo -e ""
-    echo -e "  Run the following command and follow the login instructions:"
-    echo -e "  ${C}docker sandbox run claude . --${R}"
+    echo -e "  Run one of the following and follow login instructions:"
+    echo -e "  ${C}claude auth login${R}"
+    echo -e "  ${C}codex login${R}"
+    echo -e "  ${C}gemini auth${R}"
     echo -e "${RD}░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒░░${R}"
     rm -f "$OUTPUT_FILE" "$FULL_OUTPUT_FILE"
     exit $EXIT_AUTH_ERROR

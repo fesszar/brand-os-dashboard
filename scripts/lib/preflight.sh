@@ -55,3 +55,73 @@ check_required_files() {
     log_warn "Optional file missing: .agent/prd/SUMMARY.md"
   fi
 }
+
+# Check whether Docker sandbox mode is available and ready
+# Usage: docker_sandbox_ready
+docker_sandbox_ready() {
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+
+  # Needs both command support and daemon availability
+  if ! docker sandbox --help >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if ! docker sandbox ls >/dev/null 2>&1; then
+    return 1
+  fi
+
+  return 0
+}
+
+# Check local CLI availability for the selected engine
+# Usage: local_engine_available
+local_engine_available() {
+  case "$AGENT_ENGINE" in
+    claude) command -v claude >/dev/null 2>&1 ;;
+    codex) command -v codex >/dev/null 2>&1 ;;
+    gemini) command -v gemini >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve final runner mode from auto|docker|local
+# Usage: resolve_runner_mode
+resolve_runner_mode() {
+  case "$RUNNER_MODE" in
+    auto)
+      if docker_sandbox_ready; then
+        RESOLVED_RUNNER="docker"
+      else
+        RESOLVED_RUNNER="local"
+      fi
+      ;;
+    docker|local)
+      RESOLVED_RUNNER="$RUNNER_MODE"
+      ;;
+    *)
+      log_error "Invalid runner mode: $RUNNER_MODE (expected: auto|docker|local)"
+      exit 1
+      ;;
+  esac
+}
+
+# Validate prerequisites for selected runner
+# Usage: validate_runner_prereqs
+validate_runner_prereqs() {
+  if [ "$RESOLVED_RUNNER" = "docker" ]; then
+    if ! docker_sandbox_ready; then
+      log_error "Docker runner selected, but docker sandbox is not available."
+      log_error "Start Docker Desktop and run: docker sandbox run claude . --"
+      exit 1
+    fi
+    return
+  fi
+
+  if ! local_engine_available; then
+    log_error "Local runner selected, but CLI for engine '$AGENT_ENGINE' is not available."
+    log_error "Install the CLI or switch engine with --agent claude|codex|gemini."
+    exit 1
+  fi
+}
