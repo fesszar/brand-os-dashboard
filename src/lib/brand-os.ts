@@ -122,6 +122,19 @@ async function writeJsonWithBackup(filePath: string, value: unknown) {
   await fs.writeFile(filePath, serialized, "utf8");
 }
 
+async function writeTextWithBackup(filePath: string, value: string) {
+  const parent = path.dirname(filePath);
+  await fs.mkdir(parent, { recursive: true });
+
+  if (await pathExists(filePath)) {
+    const stamp = format(new Date(), "yyyyMMdd-HHmmss");
+    const backupPath = `${filePath}.bak-${stamp}`;
+    await fs.copyFile(filePath, backupPath);
+  }
+
+  await fs.writeFile(filePath, value, "utf8");
+}
+
 async function readJsonLines<T>(filePath: string): Promise<T[]> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
@@ -448,6 +461,65 @@ export async function getDraft(brandId: string, slotDir: string) {
     texts,
     slides: slideFiles.map((filePath) => toRelativeWorkspacePath(filePath)),
     files: files.map((filePath) => toRelativeWorkspacePath(filePath)),
+  };
+}
+
+/**
+ * Updates mutable draft files for a single slot directory.
+ */
+export async function updateDraft(
+  brandId: string,
+  slotDir: string,
+  payload: {
+    meta?: Record<string, unknown>;
+    captions?: Record<string, string>;
+    texts?: unknown[];
+  },
+) {
+  const { draftsRoot } = getPaths();
+  const draftPath = path.join(draftsRoot, brandId, slotDir);
+
+  if (!(await pathExists(draftPath))) {
+    throw new Error(`Draft '${brandId}/${slotDir}' does not exist`);
+  }
+
+  if (payload.meta !== undefined) {
+    await writeJsonWithBackup(path.join(draftPath, "meta.json"), payload.meta);
+  }
+
+  if (payload.captions !== undefined) {
+    await writeJsonWithBackup(path.join(draftPath, "captions.json"), payload.captions);
+  }
+
+  if (payload.texts !== undefined) {
+    await writeJsonWithBackup(path.join(draftPath, "texts.json"), payload.texts);
+  }
+
+  invalidateCache("brands");
+  invalidateCache(`brandDetail:${brandId}`);
+  return getDraft(brandId, slotDir);
+}
+
+/**
+ * Deletes an entire draft slot directory and all generated files.
+ */
+export async function deleteDraft(brandId: string, slotDir: string) {
+  const { draftsRoot } = getPaths();
+  const draftPath = path.join(draftsRoot, brandId, slotDir);
+
+  if (!(await pathExists(draftPath))) {
+    throw new Error(`Draft '${brandId}/${slotDir}' does not exist`);
+  }
+
+  await fs.rm(draftPath, { recursive: true, force: false });
+
+  invalidateCache("brands");
+  invalidateCache(`brandDetail:${brandId}`);
+
+  return {
+    ok: true,
+    brandId,
+    slotDir,
   };
 }
 
@@ -784,6 +856,57 @@ export async function getScript(brandId: string, slotDir: string) {
   };
 }
 
+/**
+ * Updates script.json and/or script.md for an existing script slot.
+ */
+export async function updateScript(
+  brandId: string,
+  slotDir: string,
+  payload: {
+    json?: Record<string, unknown>;
+    markdown?: string;
+  },
+) {
+  const { scriptsRoot } = getPaths();
+  const scriptRoot = path.join(scriptsRoot, brandId, slotDir);
+
+  if (!(await pathExists(scriptRoot))) {
+    throw new Error(`Script '${brandId}/${slotDir}' does not exist`);
+  }
+
+  if (payload.json !== undefined) {
+    await writeJsonWithBackup(path.join(scriptRoot, "script.json"), payload.json);
+  }
+
+  if (payload.markdown !== undefined) {
+    await writeTextWithBackup(path.join(scriptRoot, "script.md"), payload.markdown);
+  }
+
+  invalidateCache(`brandDetail:${brandId}`);
+  return getScript(brandId, slotDir);
+}
+
+/**
+ * Deletes an entire script slot directory.
+ */
+export async function deleteScript(brandId: string, slotDir: string) {
+  const { scriptsRoot } = getPaths();
+  const scriptRoot = path.join(scriptsRoot, brandId, slotDir);
+
+  if (!(await pathExists(scriptRoot))) {
+    throw new Error(`Script '${brandId}/${slotDir}' does not exist`);
+  }
+
+  await fs.rm(scriptRoot, { recursive: true, force: false });
+  invalidateCache(`brandDetail:${brandId}`);
+
+  return {
+    ok: true,
+    brandId,
+    slotDir,
+  };
+}
+
 export async function listUploads(brandId?: string): Promise<UploadEntry[]> {
   const { uploadsRoot } = getPaths();
   const brands = brandId ? [brandId] : await listDirectories(uploadsRoot);
@@ -872,6 +995,87 @@ export async function saveUpload(
 
   invalidateCache("uploads");
   return targetPath;
+}
+
+async function resolveUploadPath(brandId: string, filename: string) {
+  const { uploadsRoot } = getPaths();
+  const base = path.join(uploadsRoot, brandId);
+
+  const candidates = [
+    { status: "pending" as const, path: path.join(base, filename) },
+    { status: "posted" as const, path: path.join(base, "posted", filename) },
+    { status: "published" as const, path: path.join(base, "published", filename) },
+  ];
+
+  for (const candidate of candidates) {
+    if (await pathExists(candidate.path)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Moves an upload file between pending/posted/published folders.
+ */
+export async function updateUploadStatus(
+  brandId: string,
+  filename: string,
+  status: UploadEntry["status"],
+) {
+  const current = await resolveUploadPath(brandId, filename);
+  if (!current) {
+    throw new Error(`Upload '${brandId}/${filename}' does not exist`);
+  }
+
+  if (current.status === status) {
+    return {
+      ok: true,
+      brandId,
+      filename,
+      status,
+    };
+  }
+
+  const { uploadsRoot } = getPaths();
+  const base = path.join(uploadsRoot, brandId);
+  const targetDir =
+    status === "pending"
+      ? base
+      : status === "posted"
+        ? path.join(base, "posted")
+        : path.join(base, "published");
+
+  await fs.mkdir(targetDir, { recursive: true });
+  await fs.rename(current.path, path.join(targetDir, filename));
+
+  invalidateCache("uploads");
+  return {
+    ok: true,
+    brandId,
+    filename,
+    status,
+  };
+}
+
+/**
+ * Deletes an upload file regardless of its current status folder.
+ */
+export async function deleteUpload(brandId: string, filename: string) {
+  const current = await resolveUploadPath(brandId, filename);
+  if (!current) {
+    throw new Error(`Upload '${brandId}/${filename}' does not exist`);
+  }
+
+  await fs.rm(current.path, { force: false });
+  invalidateCache("uploads");
+
+  return {
+    ok: true,
+    brandId,
+    filename,
+  };
 }
 
 export async function listPublishHistory(): Promise<PublishEntry[]> {
