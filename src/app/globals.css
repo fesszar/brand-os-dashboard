@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+:root {
+  --background: #071021;
+  --foreground: #e2e8f0;
+  --accent: #22d3a6;
+  --accent-strong: #17b78d;
+  --muted: #94a3b8;
+  --card: #0b1328;
+  --card-foreground: #e2e8f0;
+  --border: #243043;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
+  --font-mono: "Menlo", "Monaco", "Cascadia Mono", monospace;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+}

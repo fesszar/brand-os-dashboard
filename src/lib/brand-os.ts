@@ -1,0 +1,1490 @@
+import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
+
+import { addDays, format, isAfter, parseISO } from "date-fns";
+
+import type {
+  ActivityEntry,
+  BrandCard,
+  BrandStatus,
+  CronEntry,
+  DraftEntry,
+  ExperimentEntry,
+  HealthSummary,
+  PublishEntry,
+  ScriptEntry,
+  UploadEntry,
+} from "@/lib/types";
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_WORKSPACE =
+  "/Users/clawdraider/.openclaw/workspace-ozzymandias";
+const CACHE_TTL_MS = 15_000;
+
+const ACTIVE_BRANDS = new Set([
+  "invoicerate",
+  "gideonawolesi",
+  "fessburn",
+  "relaystack",
+]);
+const DECOMMISSIONED_BRANDS = new Set(["rottenswamp"]);
+
+const cacheStore = new Map<string, { expires: number; value: unknown }>();
+
+type WorkspacePaths = {
+  workspace: string;
+  brandsRoot: string;
+  draftsRoot: string;
+  uploadsRoot: string;
+  scriptsRoot: string;
+  postizConfigPath: string;
+  globalConfigPath: string;
+  cronStatePath: string;
+};
+
+function getPaths(): WorkspacePaths {
+  const workspace = process.env.WORKSPACE || DEFAULT_WORKSPACE;
+
+  return {
+    workspace,
+    brandsRoot: path.join(workspace, "skills", "brand-os", "brands"),
+    draftsRoot: path.join(workspace, "brand-marketing", "drafts"),
+    uploadsRoot: path.join(workspace, "brand-marketing", "uploads"),
+    scriptsRoot: path.join(workspace, "brand-marketing", "scripts"),
+    postizConfigPath: path.join(workspace, "brand-marketing", "config.json"),
+    globalConfigPath: path.join(workspace, "tiktok-marketing", "config.json"),
+    cronStatePath: path.join(workspace, "brand-marketing", ".dashboard-crons.json"),
+  };
+}
+
+async function withCache<T>(
+  key: string,
+  load: () => Promise<T>,
+  ttlMs = CACHE_TTL_MS,
+): Promise<T> {
+  const cached = cacheStore.get(key);
+  const now = Date.now();
+
+  if (cached && cached.expires > now) {
+    return cached.value as T;
+  }
+
+  const value = await load();
+  cacheStore.set(key, { expires: now + ttlMs, value });
+  return value;
+}
+
+export function invalidateCache(prefix?: string) {
+  if (!prefix) {
+    cacheStore.clear();
+    return;
+  }
+
+  for (const key of cacheStore.keys()) {
+    if (key.startsWith(prefix)) {
+      cacheStore.delete(key);
+    }
+  }
+}
+
+async function pathExists(targetPath: string) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonWithBackup(filePath: string, value: unknown) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  const parent = path.dirname(filePath);
+
+  await fs.mkdir(parent, { recursive: true });
+
+  if (await pathExists(filePath)) {
+    const stamp = format(new Date(), "yyyyMMdd-HHmmss");
+    const backupPath = `${filePath}.bak-${stamp}`;
+    await fs.copyFile(filePath, backupPath);
+  }
+
+  await fs.writeFile(filePath, serialized, "utf8");
+}
+
+async function readJsonLines<T>(filePath: string): Promise<T[]> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as T);
+  } catch {
+    return [];
+  }
+}
+
+async function listDirectories(root: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+async function listFiles(root: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+async function listFilesRecursive(root: string, matcher?: RegExp): Promise<string[]> {
+  const files: string[] = [];
+
+  async function walk(currentPath: string) {
+    let entries;
+    try {
+      entries = await fs.readdir(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const absolute = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolute);
+        continue;
+      }
+
+      const relative = path.relative(root, absolute);
+      if (!matcher || matcher.test(entry.name) || matcher.test(relative)) {
+        files.push(absolute);
+      }
+    }
+  }
+
+  await walk(root);
+  return files;
+}
+
+function parseSlotDir(slotDir: string) {
+  const match = slotDir.match(/^(\d{4}-\d{2}-\d{2})-(\d{4})$/);
+  return {
+    date: match?.[1] ?? "",
+    slot: match?.[2] ?? "",
+  };
+}
+
+function inferBrandStatus(brandId: string): BrandStatus {
+  if (ACTIVE_BRANDS.has(brandId)) {
+    return "active";
+  }
+
+  if (DECOMMISSIONED_BRANDS.has(brandId)) {
+    return "decommissioned";
+  }
+
+  return "inactive";
+}
+
+function sortByTimestampDesc<T extends { timestamp: string }>(items: T[]) {
+  return items.sort((a, b) => {
+    const aTime = Date.parse(a.timestamp) || 0;
+    const bTime = Date.parse(b.timestamp) || 0;
+    return bTime - aTime;
+  });
+}
+
+function toRelativeWorkspacePath(absolutePath: string) {
+  return path.relative(getPaths().workspace, absolutePath);
+}
+
+export async function getBrandIds(): Promise<string[]> {
+  const { brandsRoot } = getPaths();
+
+  return withCache("brandIds", async () => {
+    const ids = await listDirectories(brandsRoot);
+    return ids.filter((id) => id !== "_shared");
+  });
+}
+
+export async function getStorybook(brandId: string) {
+  const { brandsRoot } = getPaths();
+  const storybookPath = path.join(brandsRoot, brandId, "storybook.json");
+  return readJsonFile<Record<string, unknown> | null>(storybookPath, null);
+}
+
+export async function updateStorybook(brandId: string, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("storybook must be a JSON object");
+  }
+
+  const { brandsRoot } = getPaths();
+  const storybookPath = path.join(brandsRoot, brandId, "storybook.json");
+  await writeJsonWithBackup(storybookPath, value);
+  invalidateCache("brands");
+  invalidateCache("brandDetail");
+}
+
+export async function getHookRotation(brandId: string) {
+  const { brandsRoot } = getPaths();
+  const hookPath = path.join(brandsRoot, brandId, "hook-rotation.json");
+  return readJsonFile<Record<string, unknown>>(hookPath, {
+    cooldown_posts: 3,
+    recent_used: [],
+    angles: [],
+  });
+}
+
+export async function updateHookRotation(brandId: string, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("hook rotation must be a JSON object");
+  }
+
+  const payload = value as Record<string, unknown>;
+  if (!Array.isArray(payload.angles)) {
+    throw new Error("hook rotation requires an angles array");
+  }
+
+  const { brandsRoot } = getPaths();
+  const hookPath = path.join(brandsRoot, brandId, "hook-rotation.json");
+  await writeJsonWithBackup(hookPath, payload);
+  invalidateCache(`brandDetail:${brandId}`);
+}
+
+export async function addHookAngle(
+  brandId: string,
+  angle: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const hookRotation = await getHookRotation(brandId);
+  const angles = Array.isArray(hookRotation.angles)
+    ? [...(hookRotation.angles as Record<string, unknown>[])]
+    : [];
+
+  angles.push(angle);
+
+  const updated = {
+    ...hookRotation,
+    angles,
+  };
+
+  await updateHookRotation(brandId, updated);
+  return updated;
+}
+
+export async function getScreenshots(brandId: string) {
+  const { brandsRoot } = getPaths();
+  const screenshotsDir = path.join(brandsRoot, brandId, "context", "screenshots");
+  const imageContextPath = path.join(
+    brandsRoot,
+    brandId,
+    "context",
+    "image_context.json",
+  );
+
+  const [files, imageContext] = await Promise.all([
+    listFiles(screenshotsDir),
+    readJsonFile<Record<string, unknown> | null>(imageContextPath, null),
+  ]);
+
+  return {
+    files: files.map((name) => ({
+      name,
+      path: path.join(screenshotsDir, name),
+      relativePath: toRelativeWorkspacePath(path.join(screenshotsDir, name)),
+    })),
+    imageContext,
+  };
+}
+
+export async function saveScreenshot(
+  brandId: string,
+  fileName: string,
+  buffer: Buffer,
+): Promise<string> {
+  const { brandsRoot } = getPaths();
+  const screenshotsDir = path.join(brandsRoot, brandId, "context", "screenshots");
+  await fs.mkdir(screenshotsDir, { recursive: true });
+
+  const safeName = `${Date.now()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+  const targetPath = path.join(screenshotsDir, safeName);
+  await fs.writeFile(targetPath, buffer);
+
+  invalidateCache(`brandDetail:${brandId}`);
+  return targetPath;
+}
+
+function extractDraftPreviewText(texts: unknown): string | undefined {
+  if (!Array.isArray(texts) || texts.length === 0) {
+    return undefined;
+  }
+
+  const first = texts[0];
+  if (typeof first === "string") {
+    return first;
+  }
+
+  if (first && typeof first === "object") {
+    const candidate = (first as Record<string, unknown>).text;
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+export async function listDrafts(options?: {
+  brandId?: string;
+  date?: string;
+}): Promise<DraftEntry[]> {
+  const { draftsRoot } = getPaths();
+  const brands = options?.brandId ? [options.brandId] : await listDirectories(draftsRoot);
+
+  const allDrafts: DraftEntry[] = [];
+
+  for (const brandId of brands) {
+    const brandDraftRoot = path.join(draftsRoot, brandId);
+    const slotDirs = await listDirectories(brandDraftRoot);
+
+    for (const slotDir of slotDirs) {
+      const { date, slot } = parseSlotDir(slotDir);
+      if (options?.date && options.date !== date) {
+        continue;
+      }
+
+      const draftPath = path.join(brandDraftRoot, slotDir);
+      const [meta, captions, texts, files] = await Promise.all([
+        readJsonFile<Record<string, unknown>>(path.join(draftPath, "meta.json"), {}),
+        readJsonFile<Record<string, string>>(path.join(draftPath, "captions.json"), {}),
+        readJsonFile<unknown>(path.join(draftPath, "texts.json"), []),
+        listFiles(draftPath),
+      ]);
+
+      const publishReports = files.filter((name) => name.startsWith("publish-result-"));
+      const reportName = publishReports.length
+        ? publishReports[publishReports.length - 1]
+        : undefined;
+
+      const publish =
+        meta.publish && typeof meta.publish === "object"
+          ? (meta.publish as Record<string, unknown>)
+          : null;
+      const targets = Array.isArray(meta.targets)
+        ? (meta.targets as string[])
+        : Array.isArray(publish?.posted_targets)
+          ? (publish.posted_targets as string[])
+          : [];
+
+      allDrafts.push({
+        brandId,
+        slotDir,
+        date,
+        slot,
+        status:
+          (typeof publish?.status === "string" && publish.status) ||
+          (reportName ? "published" : "scheduled"),
+        createdAt: typeof meta.created_at === "string" ? meta.created_at : null,
+        angle: typeof meta.angle === "string" ? meta.angle : undefined,
+        angleName: typeof meta.angle_name === "string" ? meta.angle_name : undefined,
+        contentType:
+          typeof meta.content_type === "string" ? meta.content_type : "ai_slideshow",
+        targets,
+        publishReport: reportName ? path.join(draftPath, reportName) : undefined,
+        hasVideo: files.includes("video.mp4") || files.includes("video.mov"),
+        captions,
+        textPreview: extractDraftPreviewText(texts),
+      });
+    }
+  }
+
+  return allDrafts.sort((a, b) => {
+    const aTs = Date.parse(`${a.date}T${a.slot.slice(0, 2)}:${a.slot.slice(2)}:00`) || 0;
+    const bTs = Date.parse(`${b.date}T${b.slot.slice(0, 2)}:${b.slot.slice(2)}:00`) || 0;
+    return bTs - aTs;
+  });
+}
+
+export async function getDraft(brandId: string, slotDir: string) {
+  const { draftsRoot } = getPaths();
+  const draftPath = path.join(draftsRoot, brandId, slotDir);
+  const [meta, captions, prompts, texts, files] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(path.join(draftPath, "meta.json"), {}),
+    readJsonFile<Record<string, string>>(path.join(draftPath, "captions.json"), {}),
+    readJsonFile<unknown[]>(path.join(draftPath, "prompts.json"), []),
+    readJsonFile<unknown[]>(path.join(draftPath, "texts.json"), []),
+    listFilesRecursive(draftPath),
+  ]);
+
+  const slideFiles = files.filter((filePath) => /slides\/slide\d+\.(png|jpg|jpeg)$/i.test(filePath));
+
+  return {
+    brandId,
+    slotDir,
+    meta,
+    captions,
+    prompts,
+    texts,
+    slides: slideFiles.map((filePath) => toRelativeWorkspacePath(filePath)),
+    files: files.map((filePath) => toRelativeWorkspacePath(filePath)),
+  };
+}
+
+export async function getTodayTimeline() {
+  const today = format(new Date(), "yyyy-MM-dd");
+  const drafts = await listDrafts({ date: today });
+
+  return drafts
+    .map((draft) => ({
+      id: `${draft.brandId}-${draft.slotDir}`,
+      brandId: draft.brandId,
+      slot: `${draft.slot.slice(0, 2)}:${draft.slot.slice(2)}`,
+      status: draft.status,
+      targets: draft.targets,
+      contentType: draft.contentType || "ai_slideshow",
+      preview: draft.textPreview || draft.captions?.tiktok || "No preview available",
+      slotDir: draft.slotDir,
+    }))
+    .sort((a, b) => a.slot.localeCompare(b.slot));
+}
+
+export async function getHealthSummary(): Promise<HealthSummary> {
+  const [todayTimeline, drafts, uploads] = await Promise.all([
+    getTodayTimeline(),
+    listDrafts(),
+    listUploads(),
+  ]);
+
+  const now = new Date();
+  const nextPost = todayTimeline
+    .map((item) => {
+      const dt = new Date(`${format(new Date(), "yyyy-MM-dd")}T${item.slot}:00`);
+      return { ...item, dt };
+    })
+    .filter((item) => isAfter(item.dt, now))
+    .sort((a, b) => a.dt.getTime() - b.dt.getTime())[0];
+
+  const publishedToday = todayTimeline.filter((item) => item.status === "published").length;
+  const failedToday = todayTimeline.filter((item) => item.status.includes("fail")).length;
+  const skippedToday = drafts.filter((draft) => draft.status.includes("skip")).length;
+
+  return {
+    scheduledToday: todayTimeline.length,
+    publishedToday,
+    failedToday,
+    skippedToday,
+    uploadQueue: uploads.filter((upload) => upload.status === "pending").length,
+    nextPostAt: nextPost ? nextPost.dt.toISOString() : null,
+  };
+}
+
+export async function getActivityFeed(limit = 100): Promise<ActivityEntry[]> {
+  const [publishHistory, scripts, uploads, experiments] = await Promise.all([
+    listPublishHistory(),
+    listScripts(),
+    listUploads(),
+    listExperiments(),
+  ]);
+
+  const entries: ActivityEntry[] = [];
+
+  for (const publish of publishHistory) {
+    entries.push({
+      id: publish.id,
+      type: "post_published",
+      brandId: publish.brandId,
+      status: publish.ok ? "ok" : "failed",
+      timestamp: `${publish.date}T${publish.time}:00.000Z`,
+      message: publish.ok
+        ? `${publish.brandId} published to ${publish.postedTargets.join(", ") || "unknown"}`
+        : `${publish.brandId} publish failed`,
+      detail: publish.reportPath,
+    });
+  }
+
+  for (const script of scripts) {
+    entries.push({
+      id: `script-${script.brandId}-${script.slotDir}`,
+      type: "video_script_sent",
+      brandId: script.brandId,
+      status: script.status === "pending" ? "info" : "ok",
+      timestamp: `${script.date}T${script.slot.slice(0, 2)}:${script.slot.slice(2)}:00.000Z`,
+      message: `Script ${script.shortCode} (${script.angleName || script.angleId || "angle"})`,
+      detail: script.hook,
+    });
+  }
+
+  for (const upload of uploads) {
+    entries.push({
+      id: `upload-${upload.brandId}-${upload.filename}`,
+      type: "video_uploaded",
+      brandId: upload.brandId,
+      status: upload.status === "pending" ? "info" : "ok",
+      timestamp: upload.uploadedAt,
+      message: `${upload.filename} uploaded (${upload.status})`,
+      detail: upload.path,
+    });
+  }
+
+  for (const experiment of experiments) {
+    const source = typeof experiment.source === "string" ? experiment.source : "analytics";
+    const type = source.includes("warmup")
+      ? "warmup_completed"
+      : source.includes("analytics")
+        ? "analytics_ingested"
+        : source.includes("cron")
+          ? "cron_fired"
+          : "analytics_ingested";
+
+    const brandId =
+      typeof experiment.brand_id === "string" ? experiment.brand_id : "unknown_brand";
+    const timestamp =
+      typeof experiment.logged_at === "string"
+        ? experiment.logged_at
+        : new Date().toISOString();
+
+    entries.push({
+      id: `exp-${brandId}-${timestamp}-${source}`,
+      type,
+      brandId,
+      status: "info",
+      timestamp,
+      message: `${source} event for ${brandId}`,
+      detail:
+        typeof experiment.hypothesis === "string" ? experiment.hypothesis : undefined,
+      platform:
+        typeof experiment.channel_id === "string" ? experiment.channel_id : undefined,
+    });
+  }
+
+  return sortByTimestampDesc(entries).slice(0, limit);
+}
+
+export async function getBrandList(): Promise<BrandCard[]> {
+  return withCache("brands:list", async () => {
+    const [brandIds, postizConfig, drafts] = await Promise.all([
+      getBrandIds(),
+      readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {}),
+      listDrafts(),
+    ]);
+
+    const posting =
+      postizConfig.posting && typeof postizConfig.posting === "object"
+        ? (postizConfig.posting as Record<string, unknown>)
+        : {};
+
+    const thisWeekStart = addDays(new Date(), -7);
+
+    const brandCards: BrandCard[] = [];
+
+    for (const brandId of brandIds) {
+      const storybook = await getStorybook(brandId);
+      const brandInfo =
+        storybook?.brand && typeof storybook.brand === "object"
+          ? (storybook.brand as Record<string, unknown>)
+          : {};
+
+      const brandDrafts = drafts.filter((draft) => draft.brandId === brandId);
+      const postsThisWeek = brandDrafts.filter((draft) => {
+        const parsed = parseISO(`${draft.date}T00:00:00.000Z`);
+        return isAfter(parsed, thisWeekStart);
+      }).length;
+
+      const experiments = await getExperimentsForBrand(brandId);
+      const aggregateEntries = experiments
+        .map((entry) => entry.aggregate)
+        .filter((aggregate): aggregate is NonNullable<ExperimentEntry["aggregate"]> =>
+          Boolean(aggregate),
+        );
+      const engagementRate =
+        aggregateEntries.length > 0
+          ? aggregateEntries.reduce(
+              (sum, aggregate) => sum + (aggregate.engagement_rate ?? 0),
+              0,
+            ) / aggregateEntries.length
+          : 0;
+
+      const scheduleConfig =
+        posting[brandId] && typeof posting[brandId] === "object"
+          ? (posting[brandId] as Record<string, unknown>)
+          : null;
+      const firstSlot = Array.isArray(scheduleConfig?.schedule)
+        ? String(scheduleConfig.schedule[0])
+        : null;
+
+      brandCards.push({
+        id: brandId,
+        name:
+          (typeof brandInfo.name === "string" && brandInfo.name) ||
+          brandId.replace(/(^.|_.)/g, (token) => token.replace("_", " ").toUpperCase()),
+        status: inferBrandStatus(brandId),
+        category:
+          typeof brandInfo.category === "string" ? brandInfo.category : undefined,
+        postsThisWeek,
+        engagementRate,
+        nextScheduledPost: firstSlot,
+        tagline:
+          typeof (brandInfo as Record<string, unknown>).tagline === "string"
+            ? ((brandInfo as Record<string, unknown>).tagline as string)
+            : undefined,
+      });
+    }
+
+    return brandCards;
+  });
+}
+
+async function getExperimentsForBrand(brandId: string): Promise<ExperimentEntry[]> {
+  const { brandsRoot } = getPaths();
+  const experimentsPath = path.join(brandsRoot, brandId, "experiments.jsonl");
+  return readJsonLines<ExperimentEntry>(experimentsPath);
+}
+
+export async function listExperiments(): Promise<ExperimentEntry[]> {
+  const brandIds = await getBrandIds();
+  const experiments = await Promise.all(
+    brandIds.map(async (brandId) => {
+      const rows = await getExperimentsForBrand(brandId);
+      return rows.slice(-400);
+    }),
+  );
+
+  return experiments
+    .flat()
+    .sort((a, b) => {
+      const aTs = Date.parse(a.logged_at ?? "") || 0;
+      const bTs = Date.parse(b.logged_at ?? "") || 0;
+      return bTs - aTs;
+    });
+}
+
+export async function getBrandDetail(brandId: string) {
+  const cacheKey = `brandDetail:${brandId}`;
+
+  return withCache(cacheKey, async () => {
+    const [storybook, hookRotation, screenshots, drafts, experiments, config] =
+      await Promise.all([
+        getStorybook(brandId),
+        getHookRotation(brandId),
+        getScreenshots(brandId),
+        listDrafts({ brandId }),
+        getExperimentsForBrand(brandId),
+        readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {}),
+      ]);
+
+    const postiz =
+      config.postiz && typeof config.postiz === "object"
+        ? (config.postiz as Record<string, unknown>)
+        : {};
+    const posting =
+      config.posting && typeof config.posting === "object"
+        ? (config.posting as Record<string, unknown>)
+        : {};
+
+    return {
+      brandId,
+      storybook,
+      hookRotation,
+      screenshots,
+      drafts,
+      experiments: experiments.slice(-200),
+      integrations:
+        postiz[brandId] && typeof postiz[brandId] === "object"
+          ? (postiz[brandId] as Record<string, string>)
+          : {},
+      platformSettings:
+        posting[brandId] && typeof posting[brandId] === "object"
+          ? (posting[brandId] as Record<string, unknown>)
+          : {},
+    };
+  });
+}
+
+export async function listScripts(brandId?: string): Promise<ScriptEntry[]> {
+  const { scriptsRoot, draftsRoot } = getPaths();
+  const brands = brandId ? [brandId] : await listDirectories(scriptsRoot);
+
+  const scripts: ScriptEntry[] = [];
+
+  for (const id of brands) {
+    const brandRoot = path.join(scriptsRoot, id);
+    const slotDirs = await listDirectories(brandRoot);
+
+    for (const slotDir of slotDirs) {
+      const filePath = path.join(brandRoot, slotDir, "script.json");
+      const script = await readJsonFile<Record<string, unknown>>(filePath, {});
+      if (!Object.keys(script).length) {
+        continue;
+      }
+
+      const draftPath = path.join(draftsRoot, id, slotDir);
+      const draftFiles = await listFiles(draftPath);
+      const hasVideo = draftFiles.includes("video.mp4") || draftFiles.includes("video.mov");
+      const publishReport = draftFiles.some((name) => name.startsWith("publish-result-"));
+
+      scripts.push({
+        brandId: id,
+        slotDir,
+        shortCode:
+          typeof script.short_code === "string" ? script.short_code : `${id}-${slotDir}`,
+        angleId: typeof script.angle_id === "string" ? script.angle_id : undefined,
+        angleName: typeof script.angle_name === "string" ? script.angle_name : undefined,
+        hook: typeof script.hook === "string" ? script.hook : undefined,
+        slot: typeof script.slot === "string" ? script.slot : parseSlotDir(slotDir).slot,
+        date: typeof script.date === "string" ? script.date : parseSlotDir(slotDir).date,
+        status: publishReport ? "published" : hasVideo ? "recorded" : "pending",
+        hasMatchedVideo: hasVideo,
+      });
+    }
+  }
+
+  return scripts.sort((a, b) => {
+    const aTs = Date.parse(`${a.date}T${a.slot.slice(0, 2)}:${a.slot.slice(2)}:00`) || 0;
+    const bTs = Date.parse(`${b.date}T${b.slot.slice(0, 2)}:${b.slot.slice(2)}:00`) || 0;
+    return bTs - aTs;
+  });
+}
+
+export async function getScript(brandId: string, slotDir: string) {
+  const { scriptsRoot } = getPaths();
+  const scriptPath = path.join(scriptsRoot, brandId, slotDir, "script.json");
+  const markdownPath = path.join(scriptsRoot, brandId, slotDir, "script.md");
+
+  const [json, markdown] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(scriptPath, {}),
+    fs.readFile(markdownPath, "utf8").catch(() => ""),
+  ]);
+
+  return {
+    brandId,
+    slotDir,
+    json,
+    markdown,
+  };
+}
+
+export async function listUploads(brandId?: string): Promise<UploadEntry[]> {
+  const { uploadsRoot } = getPaths();
+  const brands = brandId ? [brandId] : await listDirectories(uploadsRoot);
+
+  const uploads: UploadEntry[] = [];
+
+  for (const id of brands) {
+    const base = path.join(uploadsRoot, id);
+    const [pending, posted, published] = await Promise.all([
+      listFiles(base),
+      listFiles(path.join(base, "posted")),
+      listFiles(path.join(base, "published")),
+    ]);
+
+    for (const fileName of pending) {
+      if (["posted", "published"].includes(fileName)) {
+        continue;
+      }
+
+      const absolutePath = path.join(base, fileName);
+      try {
+        const stats = await fs.stat(absolutePath);
+        uploads.push({
+          brandId: id,
+          filename: fileName,
+          path: toRelativeWorkspacePath(absolutePath),
+          status: "pending",
+          uploadedAt: stats.mtime.toISOString(),
+          sizeBytes: stats.size,
+        });
+      } catch {
+        // ignore removed files
+      }
+    }
+
+    for (const fileName of posted) {
+      const absolutePath = path.join(base, "posted", fileName);
+      try {
+        const stats = await fs.stat(absolutePath);
+        uploads.push({
+          brandId: id,
+          filename: fileName,
+          path: toRelativeWorkspacePath(absolutePath),
+          status: "posted",
+          uploadedAt: stats.mtime.toISOString(),
+          sizeBytes: stats.size,
+        });
+      } catch {
+        // ignore removed files
+      }
+    }
+
+    for (const fileName of published) {
+      const absolutePath = path.join(base, "published", fileName);
+      try {
+        const stats = await fs.stat(absolutePath);
+        uploads.push({
+          brandId: id,
+          filename: fileName,
+          path: toRelativeWorkspacePath(absolutePath),
+          status: "published",
+          uploadedAt: stats.mtime.toISOString(),
+          sizeBytes: stats.size,
+        });
+      } catch {
+        // ignore removed files
+      }
+    }
+  }
+
+  return uploads.sort((a, b) => Date.parse(b.uploadedAt) - Date.parse(a.uploadedAt));
+}
+
+export async function saveUpload(
+  brandId: string,
+  fileName: string,
+  buffer: Buffer,
+): Promise<string> {
+  const { uploadsRoot } = getPaths();
+  const brandRoot = path.join(uploadsRoot, brandId);
+  await fs.mkdir(brandRoot, { recursive: true });
+
+  const safeName = `${Date.now()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+  const targetPath = path.join(brandRoot, safeName);
+  await fs.writeFile(targetPath, buffer);
+
+  invalidateCache("uploads");
+  return targetPath;
+}
+
+export async function listPublishHistory(): Promise<PublishEntry[]> {
+  const { draftsRoot } = getPaths();
+
+  const reportFiles = await listFilesRecursive(draftsRoot, /^publish-result-.*\.json$/);
+  const entries = await Promise.all(
+    reportFiles.map(async (reportPath) => {
+      const payload = await readJsonFile<Record<string, unknown>>(reportPath, {});
+      if (!Object.keys(payload).length) {
+        return null;
+      }
+
+      const brandId =
+        typeof payload.brand_id === "string"
+          ? payload.brand_id
+          : path.basename(path.dirname(path.dirname(reportPath)));
+      const date = typeof payload.date === "string" ? payload.date : "unknown";
+      const slot = typeof payload.slot === "string" ? payload.slot : "0000";
+      const time = `${slot.slice(0, 2)}:${slot.slice(2)}`;
+      const postedTargets = Array.isArray(payload.posted_targets)
+        ? (payload.posted_targets as string[])
+        : [];
+
+      const postizResponse = Array.isArray(payload.postiz_response)
+        ? payload.postiz_response
+        : [];
+      const postizPostIds = postizResponse
+        .map((entry) =>
+          entry && typeof entry === "object"
+            ? ((entry as Record<string, unknown>).postId as string | undefined)
+            : undefined,
+        )
+        .filter((value): value is string => Boolean(value));
+
+      return {
+        id: `${brandId}-${slot}-${path.basename(reportPath)}`,
+        brandId,
+        date,
+        time,
+        contentType:
+          typeof payload.content_type === "string" ? payload.content_type : "ai_slideshow",
+        postedTargets,
+        ok: Boolean(payload.ok),
+        slot,
+        postizPostIds,
+        reportPath: toRelativeWorkspacePath(reportPath),
+      } satisfies PublishEntry;
+    }),
+  );
+
+  return entries
+    .filter((entry): entry is PublishEntry => Boolean(entry))
+    .sort((a, b) => {
+      const aTs = Date.parse(`${a.date}T${a.time}:00`) || 0;
+      const bTs = Date.parse(`${b.date}T${b.time}:00`) || 0;
+      return bTs - aTs;
+    });
+}
+
+export async function getCalendarItems() {
+  const [drafts, scripts] = await Promise.all([listDrafts(), listScripts()]);
+
+  const draftItems = drafts.map((draft) => ({
+    id: `draft-${draft.brandId}-${draft.slotDir}`,
+    kind: "draft",
+    brandId: draft.brandId,
+    date: draft.date,
+    slot: draft.slot,
+    status: draft.status,
+    title: draft.angleName || draft.angle || "Draft",
+  }));
+
+  const scriptItems = scripts.map((script) => ({
+    id: `script-${script.brandId}-${script.slotDir}`,
+    kind: "script",
+    brandId: script.brandId,
+    date: script.date,
+    slot: script.slot,
+    status: script.status,
+    title: script.angleName || script.angleId || script.shortCode,
+  }));
+
+  return [...draftItems, ...scriptItems].sort((a, b) => {
+    const aTs = Date.parse(`${a.date}T${a.slot.slice(0, 2)}:${a.slot.slice(2)}:00`) || 0;
+    const bTs = Date.parse(`${b.date}T${b.slot.slice(0, 2)}:${b.slot.slice(2)}:00`) || 0;
+    return aTs - bTs;
+  });
+}
+
+export async function triggerDraftGeneration(brandId: string, slot: string) {
+  const now = new Date().toISOString();
+  return {
+    ok: true,
+    action: "generate",
+    brandId,
+    slot,
+    triggeredAt: now,
+    note: "Generation trigger endpoint is wired. Integrate with Brand OS generate CLI when command contract is finalized.",
+  };
+}
+
+export async function triggerDraftPublish(brandId: string, slotDir: string) {
+  const now = new Date().toISOString();
+  return {
+    ok: true,
+    action: "publish",
+    brandId,
+    slotDir,
+    triggeredAt: now,
+    note: "Publish trigger endpoint is wired. Integrate with Brand OS publish CLI when command contract is finalized.",
+  };
+}
+
+export async function listCrons(): Promise<{ jobs: CronEntry[]; raw?: unknown; error?: string }> {
+  const { cronStatePath } = getPaths();
+
+  try {
+    const { stdout } = await execFileAsync("openclaw", ["cron", "list", "--json"]);
+    const parsed = JSON.parse(stdout) as unknown;
+
+    let jobs: CronEntry[] = [];
+    if (Array.isArray(parsed)) {
+      jobs = parsed.map((row, index) => {
+        const item = row as Record<string, unknown>;
+        return {
+          id: typeof item.id === "string" ? item.id : `cron-${index}`,
+          name:
+            typeof item.name === "string"
+              ? item.name
+              : typeof item.task === "string"
+                ? item.task
+                : `Cron ${index + 1}`,
+          schedule: typeof item.schedule === "string" ? item.schedule : "unknown",
+          nextRun: typeof item.next_run === "string" ? item.next_run : undefined,
+          lastRun: typeof item.last_run === "string" ? item.last_run : undefined,
+          lastStatus:
+            typeof item.last_status === "string"
+              ? item.last_status.includes("fail")
+                ? "failed"
+                : "ok"
+              : "unknown",
+          enabled: Boolean(item.enabled ?? true),
+          group: typeof item.group === "string" ? item.group : undefined,
+        } satisfies CronEntry;
+      });
+    }
+
+    await writeJsonWithBackup(cronStatePath, jobs);
+    return { jobs, raw: parsed };
+  } catch (error) {
+    const fallback = await readJsonFile<CronEntry[]>(cronStatePath, []);
+    return {
+      jobs: fallback,
+      error: error instanceof Error ? error.message : "Unable to list crons",
+    };
+  }
+}
+
+export async function runCron(id: string) {
+  try {
+    const { stdout } = await execFileAsync("openclaw", ["cron", "run", id]);
+    return { ok: true, id, output: stdout.trim() };
+  } catch (error) {
+    return {
+      ok: false,
+      id,
+      error: error instanceof Error ? error.message : "failed to run cron",
+    };
+  }
+}
+
+export async function toggleCron(id: string, enabled: boolean) {
+  const list = await listCrons();
+  const updated = list.jobs.map((job) =>
+    job.id === id
+      ? {
+          ...job,
+          enabled,
+        }
+      : job,
+  );
+
+  await writeJsonWithBackup(getPaths().cronStatePath, updated);
+
+  return {
+    ok: true,
+    id,
+    enabled,
+    note: "State stored in dashboard fallback file. Wire to openclaw cron enable/disable command when exposed.",
+  };
+}
+
+export async function getPipelineMonitor() {
+  const [drafts, publishes, experiments] = await Promise.all([
+    listDrafts(),
+    listPublishHistory(),
+    listExperiments(),
+  ]);
+
+  const brands = await getBrandIds();
+
+  return brands.map((brandId) => {
+    const draftCount = drafts.filter((draft) => draft.brandId === brandId).length;
+    const publishedCount = publishes.filter((post) => post.brandId === brandId).length;
+    const analyticsCount = experiments.filter((entry) => entry.brand_id === brandId).length;
+
+    return {
+      brandId,
+      stages: [
+        {
+          name: "Generate",
+          value: draftCount,
+          status: draftCount > 0 ? "ok" : "warning",
+        },
+        {
+          name: "Draft",
+          value: draftCount,
+          status: draftCount > 0 ? "ok" : "warning",
+        },
+        {
+          name: "Publish",
+          value: publishedCount,
+          status: publishedCount > 0 ? "ok" : "warning",
+        },
+        {
+          name: "Analytics",
+          value: analyticsCount,
+          status: analyticsCount > 0 ? "ok" : "warning",
+        },
+      ],
+      alerts: [
+        draftCount === 0 ? "No drafts queued" : null,
+        publishedCount === 0 ? "No publish records" : null,
+      ].filter((value): value is string => Boolean(value)),
+    };
+  });
+}
+
+export async function getWarmupStatus() {
+  const experiments = await listExperiments();
+  const brands = await getBrandIds();
+
+  return brands.map((brandId) => {
+    const brandRows = experiments.filter(
+      (entry) => entry.brand_id === brandId && String(entry.source).includes("warmup"),
+    );
+    const latest = brandRows[0];
+
+    return {
+      brandId,
+      lastWarmupAt:
+        typeof latest?.logged_at === "string" ? latest.logged_at : null,
+      status: latest ? "ok" : "unknown",
+      pattern: latest?.metric ?? "N/A",
+    };
+  });
+}
+
+export async function getPlatformSettings() {
+  const config = await readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {});
+  const postiz =
+    config.postiz && typeof config.postiz === "object"
+      ? (config.postiz as Record<string, unknown>)
+      : {};
+  const posting =
+    config.posting && typeof config.posting === "object"
+      ? (config.posting as Record<string, unknown>)
+      : {};
+
+  const brandIds = await getBrandIds();
+
+  return brandIds.map((brandId) => ({
+    brandId,
+    posting:
+      posting[brandId] && typeof posting[brandId] === "object"
+        ? posting[brandId]
+        : {},
+    integrations:
+      postiz[brandId] && typeof postiz[brandId] === "object"
+        ? postiz[brandId]
+        : {},
+  }));
+}
+
+export async function getCrossBrandAnalytics() {
+  const [brands, experiments] = await Promise.all([getBrandList(), listExperiments()]);
+
+  const summary = brands.map((brand) => {
+    const rows = experiments.filter((row) => row.brand_id === brand.id);
+    const aggregates = rows
+      .map((row) => row.aggregate)
+      .filter((value): value is NonNullable<ExperimentEntry["aggregate"]> => Boolean(value));
+
+    const totals = aggregates.reduce<{ views: number; engagement: number; posts: number }>(
+      (acc, row) => ({
+        views: acc.views + (row.views ?? 0),
+        engagement: acc.engagement + (row.engagement ?? 0),
+        posts: acc.posts + (row.posts ?? 0),
+      }),
+      { views: 0, engagement: 0, posts: 0 },
+    );
+
+    return {
+      brandId: brand.id,
+      name: brand.name,
+      views: totals.views,
+      engagement: totals.engagement,
+      posts: totals.posts,
+      engagementRate: totals.posts > 0 ? totals.engagement / totals.posts : 0,
+    };
+  });
+
+  const best = [...summary].sort((a, b) => b.engagementRate - a.engagementRate)[0];
+
+  return {
+    summary,
+    bestBrand: best || null,
+  };
+}
+
+export async function getBrandPerformance(brandId: string) {
+  const experiments = (await getExperimentsForBrand(brandId)).slice(0, 250);
+
+  return experiments
+    .filter((entry) => entry.aggregate)
+    .map((entry) => ({
+      date: entry.logged_at ? format(parseISO(entry.logged_at), "MMM dd") : "Unknown",
+      views: entry.aggregate?.views ?? 0,
+      likes: entry.aggregate?.likes ?? 0,
+      comments: entry.aggregate?.comments ?? 0,
+      shares: entry.aggregate?.shares ?? 0,
+      saves: entry.aggregate?.saves ?? 0,
+      engagementRate: entry.aggregate?.engagement_rate ?? 0,
+      source: entry.source ?? "unknown",
+    }))
+    .slice(0, 40)
+    .reverse();
+}
+
+export async function getFunnelAnalytics() {
+  const storybook = await getStorybook("gideonawolesi");
+  const experiments = await getExperimentsForBrand("gideonawolesi");
+
+  const funnel =
+    storybook?.funnel && typeof storybook.funnel === "object"
+      ? (storybook.funnel as Record<string, unknown>)
+      : {};
+
+  const stages = Array.isArray(funnel.stages)
+    ? (funnel.stages as { name?: string; weight?: number }[])
+    : [
+        { name: "awareness", weight: 0.35 },
+        { name: "trust", weight: 0.3 },
+        { name: "consideration", weight: 0.2 },
+        { name: "conversion", weight: 0.15 },
+      ];
+
+  const engagement = experiments
+    .map((entry) => entry.aggregate?.engagement ?? 0)
+    .reduce((sum, value) => sum + value, 0);
+
+  return {
+    stages: stages.map((stage, index) => ({
+      stage: stage.name || `stage_${index + 1}`,
+      weight: stage.weight ?? 0,
+      estimatedLeads: Math.round((engagement * (stage.weight ?? 0)) / 100),
+    })),
+    ctaPerformance: [
+      { cta: "DM me AI", conversions: Math.round(engagement * 0.08) },
+      { cta: "Book a consult", conversions: Math.round(engagement * 0.05) },
+      { cta: "Comment keyword", conversions: Math.round(engagement * 0.03) },
+    ],
+  };
+}
+
+export async function getGlobalSettings() {
+  const [brandConfig, globalConfig] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {}),
+    readJsonFile<Record<string, unknown>>(getPaths().globalConfigPath, {}),
+  ]);
+
+  return {
+    workspace: getPaths().workspace,
+    timezone:
+      (brandConfig.posting as Record<string, { timezone?: string }> | undefined)?.personal
+        ?.timezone || "Europe/Warsaw",
+    defaultGenerationModel:
+      typeof (brandConfig.imageGen as Record<string, unknown> | undefined)?.model ===
+      "string"
+        ? ((brandConfig.imageGen as Record<string, unknown>).model as string)
+        : "gemini-2.5-flash-image",
+    defaultPublishingModel:
+      typeof globalConfig.publishModel === "string"
+        ? (globalConfig.publishModel as string)
+        : "flash",
+    postizConfigured: Boolean(
+      (brandConfig.postiz as Record<string, unknown> | undefined)?.apiKey,
+    ),
+    notificationChannel:
+      typeof globalConfig.notifications === "string"
+        ? (globalConfig.notifications as string)
+        : "telegram",
+    rawBrandConfig: brandConfig,
+    rawGlobalConfig: globalConfig,
+  };
+}
+
+export async function updateGlobalSettings(payload: Record<string, unknown>) {
+  const { postizConfigPath, globalConfigPath } = getPaths();
+
+  const brandConfig = await readJsonFile<Record<string, unknown>>(postizConfigPath, {});
+  const globalConfig = await readJsonFile<Record<string, unknown>>(globalConfigPath, {});
+
+  if (typeof payload.timezone === "string") {
+    const posting =
+      brandConfig.posting && typeof brandConfig.posting === "object"
+        ? (brandConfig.posting as Record<string, unknown>)
+        : {};
+    const personal =
+      posting.personal && typeof posting.personal === "object"
+        ? (posting.personal as Record<string, unknown>)
+        : {};
+
+    posting.personal = {
+      ...personal,
+      timezone: payload.timezone,
+    };
+
+    brandConfig.posting = posting;
+  }
+
+  if (typeof payload.defaultGenerationModel === "string") {
+    const imageGen =
+      brandConfig.imageGen && typeof brandConfig.imageGen === "object"
+        ? (brandConfig.imageGen as Record<string, unknown>)
+        : {};
+
+    brandConfig.imageGen = {
+      ...imageGen,
+      model: payload.defaultGenerationModel,
+    };
+  }
+
+  if (typeof payload.defaultPublishingModel === "string") {
+    globalConfig.publishModel = payload.defaultPublishingModel;
+  }
+
+  if (typeof payload.notificationChannel === "string") {
+    globalConfig.notifications = payload.notificationChannel;
+  }
+
+  await Promise.all([
+    writeJsonWithBackup(postizConfigPath, brandConfig),
+    writeJsonWithBackup(globalConfigPath, globalConfig),
+  ]);
+
+  invalidateCache();
+
+  return {
+    ok: true,
+    settings: await getGlobalSettings(),
+  };
+}
+
+function buildStorybookSkeleton(brandId: string, brandName: string) {
+  return {
+    schema_version: "1.0.0",
+    generated_at: new Date().toISOString(),
+    brand: {
+      id: brandId,
+      name: brandName,
+      category: "new_brand",
+      positioning: {
+        for_who: "",
+        primary_pain: "",
+        promise: "",
+        differentiation: [],
+        proof_points: [],
+      },
+    },
+    voice: {
+      tone_sliders: {
+        confident: 0.6,
+        playful: 0.2,
+        luxurious: 0.1,
+        technical: 0.4,
+        empathetic: 0.5,
+      },
+      style_rules: [],
+      vocabulary: {
+        preferred: [],
+        banned: [],
+      },
+    },
+    messaging: {
+      pillars: [],
+      ctas: {
+        primary: [],
+        secondary: [],
+        avoid: [],
+      },
+    },
+  };
+}
+
+export async function createBrand(brandId: string, brandName: string) {
+  const { brandsRoot, draftsRoot, uploadsRoot, scriptsRoot } = getPaths();
+
+  const sanitizedId = brandId.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  const brandRoot = path.join(brandsRoot, sanitizedId);
+
+  if (await pathExists(brandRoot)) {
+    throw new Error(`Brand '${sanitizedId}' already exists`);
+  }
+
+  await fs.mkdir(path.join(brandRoot, "context", "screenshots"), { recursive: true });
+  await fs.mkdir(path.join(draftsRoot, sanitizedId), { recursive: true });
+  await fs.mkdir(path.join(uploadsRoot, sanitizedId), { recursive: true });
+  await fs.mkdir(path.join(scriptsRoot, sanitizedId), { recursive: true });
+
+  await Promise.all([
+    writeJsonWithBackup(
+      path.join(brandRoot, "storybook.json"),
+      buildStorybookSkeleton(sanitizedId, brandName),
+    ),
+    writeJsonWithBackup(path.join(brandRoot, "hook-rotation.json"), {
+      cooldown_posts: 3,
+      recent_used: [],
+      angles: [],
+    }),
+    fs.writeFile(path.join(brandRoot, "experiments.jsonl"), "", "utf8"),
+  ]);
+
+  invalidateCache();
+
+  return {
+    ok: true,
+    brandId: sanitizedId,
+  };
+}
+
+export async function decommissionBrand(brandId: string) {
+  const storybook = await getStorybook(brandId);
+  if (!storybook) {
+    throw new Error(`Brand '${brandId}' does not exist`);
+  }
+
+  const nextStorybook = {
+    ...storybook,
+    lifecycle: {
+      status: "decommissioned",
+      decommissioned_at: new Date().toISOString(),
+    },
+  };
+
+  await updateStorybook(brandId, nextStorybook);
+  invalidateCache();
+
+  return {
+    ok: true,
+    brandId,
+    status: "decommissioned",
+  };
+}
+
+export async function cloneBrand(sourceBrandId: string, newBrandId: string) {
+  const { brandsRoot } = getPaths();
+  const sourceRoot = path.join(brandsRoot, sourceBrandId);
+  const targetId = newBrandId.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  const targetRoot = path.join(brandsRoot, targetId);
+
+  if (!(await pathExists(sourceRoot))) {
+    throw new Error(`Source brand '${sourceBrandId}' does not exist`);
+  }
+
+  if (await pathExists(targetRoot)) {
+    throw new Error(`Target brand '${targetId}' already exists`);
+  }
+
+  await fs.mkdir(targetRoot, { recursive: true });
+
+  const filesToClone = ["storybook.json", "hook-rotation.json", "experiments.jsonl"];
+  for (const fileName of filesToClone) {
+    const sourceFile = path.join(sourceRoot, fileName);
+    const targetFile = path.join(targetRoot, fileName);
+    if (await pathExists(sourceFile)) {
+      await fs.copyFile(sourceFile, targetFile);
+    }
+  }
+
+  await fs.mkdir(path.join(targetRoot, "context", "screenshots"), { recursive: true });
+
+  const storybook = await getStorybook(targetId);
+  if (storybook?.brand && typeof storybook.brand === "object") {
+    const brand = storybook.brand as Record<string, unknown>;
+    const updated = {
+      ...storybook,
+      brand: {
+        ...brand,
+        id: targetId,
+        name: typeof brand.name === "string" ? `${brand.name} Clone` : targetId,
+      },
+    };
+
+    await updateStorybook(targetId, updated);
+  }
+
+  invalidateCache();
+
+  return {
+    ok: true,
+    sourceBrandId,
+    brandId: targetId,
+  };
+}
