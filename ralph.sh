@@ -122,6 +122,19 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
   if [ "$RESOLVED_RUNNER" = "docker" ]; then
     export DOCKER_DEFAULT_PLATFORM=linux/amd64 # Needed for Playwright.
     TOKEN_TO_USE="${RALPH_CLAUDE_OAUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+    if [ "$AGENT_ENGINE" = "claude" ] && [ -n "$TOKEN_TO_USE" ] && [ -z "${RALPH_AUTH_PREFLIGHT_DONE:-}" ]; then
+      AUTH_PREFLIGHT_OUTPUT="$(CLAUDE_CODE_OAUTH_TOKEN="$TOKEN_TO_USE" claude --model "$MODEL_NAME" --output-format stream-json --verbose -p 'Reply exactly: <ok/>' 2>&1 || true)"
+      if echo "$AUTH_PREFLIGHT_OUTPUT" | grep -qiE "Invalid bearer token|authentication_error|Not logged in"; then
+        echo ""
+        echo -e "${RD}░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒░░${R}"
+        echo -e "  ❌ ${RD}Authentication Error${R}"
+        echo -e "  The supplied Claude OAuth token is invalid or expired."
+        echo -e "  Generate a new long-lived token with: ${C}claude setup-token${R}"
+        echo -e "${RD}░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒░░${R}"
+        exit $EXIT_AUTH_ERROR
+      fi
+      export RALPH_AUTH_PREFLIGHT_DONE=1
+    fi
     if [ "$AGENT_ENGINE" = "claude" ] && [ -n "$TOKEN_TO_USE" ]; then
       SANDBOX_BASE="$(basename "$SCRIPT_DIR" | tr -c '[:alnum:]._-+' '-' | sed 's/^-*//;s/-*$//')"
       SANDBOX_NAME="${RALPH_DOCKER_SANDBOX_NAME:-claude-${SANDBOX_BASE}}"
