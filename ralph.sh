@@ -122,7 +122,11 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
   if [ "$RESOLVED_RUNNER" = "docker" ]; then
     export DOCKER_DEFAULT_PLATFORM=linux/amd64 # Needed for Playwright.
     TOKEN_TO_USE="${RALPH_CLAUDE_OAUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
-    if [ -n "$TOKEN_TO_USE" ]; then
+    if [ "$AGENT_ENGINE" = "claude" ] && [ -n "$TOKEN_TO_USE" ]; then
+      SANDBOX_BASE="$(basename "$SCRIPT_DIR" | tr -c '[:alnum:]._-+' '-' | sed 's/^-*//;s/-*$//')"
+      SANDBOX_NAME="${RALPH_DOCKER_SANDBOX_NAME:-claude-${SANDBOX_BASE}}"
+      AGENT_CMD='docker sandbox run claude . -- --version >/dev/null 2>&1; docker sandbox exec -e CLAUDE_CODE_OAUTH_TOKEN="'"$TOKEN_TO_USE"'" "'"$SANDBOX_NAME"'" claude --model '"$MODEL_NAME"' --output-format stream-json --verbose -p "$PROMPT_CONTENT"'
+    elif [ -n "$TOKEN_TO_USE" ]; then
       AGENT_CMD='CLAUDE_CODE_OAUTH_TOKEN="'"$TOKEN_TO_USE"'" docker sandbox run claude . -- --model '"$MODEL_NAME"' --output-format stream-json --verbose -p "$PROMPT_CONTENT"'
     else
       AGENT_CMD='docker sandbox run claude . -- --model '"$MODEL_NAME"' --output-format stream-json --verbose -p "$PROMPT_CONTENT"'
@@ -199,8 +203,19 @@ $(cat $SCRIPT_DIR/.agent/PROMPT.md)"
     exit $EXIT_DOCKER_ERROR
   fi
 
-  # Check for invalid API key / authentication error
-  if echo "$OUTPUT" | grep -qiE "Invalid API key|authentication error|please authenticate|not logged in"; then
+  # Detect whether the agent produced a successful result payload.
+  # Some streams include "needs-auth" statuses for optional MCP servers,
+  # which should not be treated as runner auth failures.
+  HAS_SUCCESS_RESULT=false
+  if echo "$OUTPUT" | grep -q '"type":"result","subtype":"success","is_error":false'; then
+    HAS_SUCCESS_RESULT=true
+  elif echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
+    HAS_SUCCESS_RESULT=true
+  fi
+
+  # Check for invalid API key / authentication error only if we did not
+  # receive a successful result payload.
+  if [ "$HAS_SUCCESS_RESULT" = "false" ] && echo "$OUTPUT" | grep -qiE "Invalid API key|authentication error|please authenticate|not logged in"; then
     stop_spinner
     clear_rolling_preview
     echo ""
