@@ -1,0 +1,4 @@
+{
+  "brand": { "name": "Gideon Awolesi", "category": "personal" },
+  "funnel": { "stages": [ { "name": "awareness", "weight": 0.5 }, { "name": "trust", "weight": 0.3 }, { "name": "conversion", "weight": 0.2 } ] }
+}

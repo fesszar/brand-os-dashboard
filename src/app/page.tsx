@@ -28,6 +28,8 @@ function countdownTo(nextPostAt: string | null) {
   return formatDistanceToNowStrict(addSeconds(new Date(), seconds), { addSuffix: true });
 }
 
+export const dynamic = "force-dynamic";
+
 export default async function DashboardPage() {
   const [timeline, health, activity, brands] = await Promise.all([
     getTodayTimeline(),

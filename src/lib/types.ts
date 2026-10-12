@@ -183,6 +183,10 @@ export type ExperimentEntry = {
     clicks?: number;
     engagement?: number;
     engagement_rate?: number;
+    profile_visits?: number;
+    dms?: number;
+    leads?: number;
+    clients?: number;
   };
   [key: string]: unknown;
 };

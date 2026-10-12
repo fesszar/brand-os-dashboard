@@ -1,5 +1,5 @@
 import { badRequest, ok, serverError } from "@/lib/api";
-import { getBrandPerformance } from "@/lib/brand-os";
+import { getBrandPerformance } from "@/lib/analytics-data";
 import { decodeSegment, isValidBrandId } from "@/lib/route-validation";
 
 export async function GET(
@@ -14,8 +14,7 @@ export async function GET(
       return badRequest("invalid brand id");
     }
 
-    const experiments = await getBrandPerformance(brand);
-    return ok({ brandId: brand, experiments });
+    return ok({ brandId: brand, performance: await getBrandPerformance(brand) });
   } catch (error) {
     return serverError(error);
   }

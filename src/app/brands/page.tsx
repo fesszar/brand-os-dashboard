@@ -1,9 +1,13 @@
 import Link from "next/link";
 
+import { AddBrandDialog } from "@/components/brands/add-brand-dialog";
+import { BrandCardActions } from "@/components/brands/brand-card-actions";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { getBrandList } from "@/lib/brand-os";
+
+export const dynamic = "force-dynamic";
 
 export default async function BrandsPage() {
   const brands = await getBrandList();
@@ -18,11 +22,12 @@ export default async function BrandsPage() {
             Active, inactive, and decommissioned Brand OS properties.
           </p>
         </div>
+        <AddBrandDialog />
       </section>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {brands.map((brand) => (
-          <Card key={brand.id}>
+          <Card key={brand.id} data-testid={`brand-card-${brand.id}`}>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
                 <CardTitle>{brand.name}</CardTitle>
@@ -41,7 +46,7 @@ export default async function BrandsPage() {
                 <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-2">
                   <p className="text-xs text-slate-400">Engagement</p>
                   <p className="text-lg font-semibold text-slate-100">
-                    {brand.engagementRate.toFixed(2)}
+                    {`${(brand.engagementRate * 100).toFixed(2)}%`}
                   </p>
                 </div>
               </div>
@@ -50,13 +55,18 @@ export default async function BrandsPage() {
               </p>
             </CardContent>
 
-            <CardFooter>
+            <CardFooter className="flex-col gap-2">
               <Link
                 href={`/brands/${brand.id}`}
                 className="inline-flex h-10 w-full items-center justify-center rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-black transition-colors hover:bg-[var(--accent-strong)]"
               >
                 Open Brand Workspace
               </Link>
+              <BrandCardActions
+                brandId={brand.id}
+                brandName={brand.name}
+                decommissioned={brand.status === "decommissioned"}
+              />
             </CardFooter>
           </Card>
         ))}

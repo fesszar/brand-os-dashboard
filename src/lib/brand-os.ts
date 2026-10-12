@@ -13,6 +13,7 @@ import type {
   ScriptEntry,
   UploadEntry,
 } from "@/lib/types";
+import { totals } from "@/lib/analytics-math";
 import { listPublishHistory } from "@/lib/publishing";
 import {
   getPaths,
@@ -41,7 +42,23 @@ const ACTIVE_BRANDS = new Set([
 ]);
 const DECOMMISSIONED_BRANDS = new Set(["rottenswamp"]);
 
-function inferBrandStatus(brandId: string): BrandStatus {
+/**
+ * Resolves brand status: an explicit storybook `lifecycle.status` wins over the
+ * built-in defaults for known brands.
+ */
+export function inferBrandStatus(
+  brandId: string,
+  storybook?: Record<string, unknown> | null,
+): BrandStatus {
+  const lifecycle = storybook?.lifecycle;
+  const explicit =
+    lifecycle && typeof lifecycle === "object"
+      ? (lifecycle as Record<string, unknown>).status
+      : undefined;
+  if (explicit === "active" || explicit === "inactive" || explicit === "decommissioned") {
+    return explicit;
+  }
+
   if (ACTIVE_BRANDS.has(brandId)) {
     return "active";
   }
@@ -503,19 +520,7 @@ export async function getBrandList(): Promise<BrandCard[]> {
         return isAfter(parsed, thisWeekStart);
       }).length;
 
-      const experiments = await getExperimentsForBrand(brandId);
-      const aggregateEntries = experiments
-        .map((entry) => entry.aggregate)
-        .filter((aggregate): aggregate is NonNullable<ExperimentEntry["aggregate"]> =>
-          Boolean(aggregate),
-        );
-      const engagementRate =
-        aggregateEntries.length > 0
-          ? aggregateEntries.reduce(
-              (sum, aggregate) => sum + (aggregate.engagement_rate ?? 0),
-              0,
-            ) / aggregateEntries.length
-          : 0;
+      const engagementRate = totals(await getExperimentsForBrand(brandId)).engagementRate;
 
       const scheduleConfig =
         posting[brandId] && typeof posting[brandId] === "object"
@@ -530,7 +535,7 @@ export async function getBrandList(): Promise<BrandCard[]> {
         name:
           (typeof brandInfo.name === "string" && brandInfo.name) ||
           brandId.replace(/(^.|_.)/g, (token) => token.replace("_", " ").toUpperCase()),
-        status: inferBrandStatus(brandId),
+        status: inferBrandStatus(brandId, storybook),
         category:
           typeof brandInfo.category === "string" ? brandInfo.category : undefined,
         postsThisWeek,
@@ -547,7 +552,7 @@ export async function getBrandList(): Promise<BrandCard[]> {
   });
 }
 
-async function getExperimentsForBrand(brandId: string): Promise<ExperimentEntry[]> {
+export async function getExperimentsForBrand(brandId: string): Promise<ExperimentEntry[]> {
   const { brandsRoot } = getPaths();
   const experimentsPath = path.join(brandsRoot, brandId, "experiments.jsonl");
   return readJsonLines<ExperimentEntry>(experimentsPath);
@@ -949,338 +954,5 @@ export async function triggerDraftPublish(brandId: string, slotDir: string) {
     slotDir,
     triggeredAt: now,
     note: "Publish trigger endpoint is wired. Integrate with Brand OS publish CLI when command contract is finalized.",
-  };
-}
-
-
-export async function getCrossBrandAnalytics() {
-  const [brands, experiments] = await Promise.all([getBrandList(), listExperiments()]);
-
-  const summary = brands.map((brand) => {
-    const rows = experiments.filter((row) => row.brand_id === brand.id);
-    const aggregates = rows
-      .map((row) => row.aggregate)
-      .filter((value): value is NonNullable<ExperimentEntry["aggregate"]> => Boolean(value));
-
-    const totals = aggregates.reduce<{ views: number; engagement: number; posts: number }>(
-      (acc, row) => ({
-        views: acc.views + (row.views ?? 0),
-        engagement: acc.engagement + (row.engagement ?? 0),
-        posts: acc.posts + (row.posts ?? 0),
-      }),
-      { views: 0, engagement: 0, posts: 0 },
-    );
-
-    return {
-      brandId: brand.id,
-      name: brand.name,
-      views: totals.views,
-      engagement: totals.engagement,
-      posts: totals.posts,
-      engagementRate: totals.posts > 0 ? totals.engagement / totals.posts : 0,
-    };
-  });
-
-  const best = [...summary].sort((a, b) => b.engagementRate - a.engagementRate)[0];
-
-  return {
-    summary,
-    bestBrand: best || null,
-  };
-}
-
-export async function getBrandPerformance(brandId: string) {
-  const experiments = (await getExperimentsForBrand(brandId)).slice(0, 250);
-
-  return experiments
-    .filter((entry) => entry.aggregate)
-    .map((entry) => ({
-      date: entry.logged_at ? format(parseISO(entry.logged_at), "MMM dd") : "Unknown",
-      views: entry.aggregate?.views ?? 0,
-      likes: entry.aggregate?.likes ?? 0,
-      comments: entry.aggregate?.comments ?? 0,
-      shares: entry.aggregate?.shares ?? 0,
-      saves: entry.aggregate?.saves ?? 0,
-      engagementRate: entry.aggregate?.engagement_rate ?? 0,
-      source: entry.source ?? "unknown",
-    }))
-    .slice(0, 40)
-    .reverse();
-}
-
-export async function getFunnelAnalytics() {
-  const storybook = await getStorybook("gideonawolesi");
-  const experiments = await getExperimentsForBrand("gideonawolesi");
-
-  const funnel =
-    storybook?.funnel && typeof storybook.funnel === "object"
-      ? (storybook.funnel as Record<string, unknown>)
-      : {};
-
-  const stages = Array.isArray(funnel.stages)
-    ? (funnel.stages as { name?: string; weight?: number }[])
-    : [
-        { name: "awareness", weight: 0.35 },
-        { name: "trust", weight: 0.3 },
-        { name: "consideration", weight: 0.2 },
-        { name: "conversion", weight: 0.15 },
-      ];
-
-  const engagement = experiments
-    .map((entry) => entry.aggregate?.engagement ?? 0)
-    .reduce((sum, value) => sum + value, 0);
-
-  return {
-    stages: stages.map((stage, index) => ({
-      stage: stage.name || `stage_${index + 1}`,
-      weight: stage.weight ?? 0,
-      estimatedLeads: Math.round((engagement * (stage.weight ?? 0)) / 100),
-    })),
-    ctaPerformance: [
-      { cta: "DM me AI", conversions: Math.round(engagement * 0.08) },
-      { cta: "Book a consult", conversions: Math.round(engagement * 0.05) },
-      { cta: "Comment keyword", conversions: Math.round(engagement * 0.03) },
-    ],
-  };
-}
-
-export async function getGlobalSettings() {
-  const [brandConfig, globalConfig] = await Promise.all([
-    readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {}),
-    readJsonFile<Record<string, unknown>>(getPaths().globalConfigPath, {}),
-  ]);
-
-  return {
-    workspace: getPaths().workspace,
-    timezone:
-      (brandConfig.posting as Record<string, { timezone?: string }> | undefined)?.personal
-        ?.timezone || "Europe/Warsaw",
-    defaultGenerationModel:
-      typeof (brandConfig.imageGen as Record<string, unknown> | undefined)?.model ===
-      "string"
-        ? ((brandConfig.imageGen as Record<string, unknown>).model as string)
-        : "gemini-2.5-flash-image",
-    defaultPublishingModel:
-      typeof globalConfig.publishModel === "string"
-        ? (globalConfig.publishModel as string)
-        : "flash",
-    postizConfigured: Boolean(
-      (brandConfig.postiz as Record<string, unknown> | undefined)?.apiKey,
-    ),
-    notificationChannel:
-      typeof globalConfig.notifications === "string"
-        ? (globalConfig.notifications as string)
-        : "telegram",
-    rawBrandConfig: brandConfig,
-    rawGlobalConfig: globalConfig,
-  };
-}
-
-export async function updateGlobalSettings(payload: Record<string, unknown>) {
-  const { postizConfigPath, globalConfigPath } = getPaths();
-
-  const brandConfig = await readJsonFile<Record<string, unknown>>(postizConfigPath, {});
-  const globalConfig = await readJsonFile<Record<string, unknown>>(globalConfigPath, {});
-
-  if (typeof payload.timezone === "string") {
-    const posting =
-      brandConfig.posting && typeof brandConfig.posting === "object"
-        ? (brandConfig.posting as Record<string, unknown>)
-        : {};
-    const personal =
-      posting.personal && typeof posting.personal === "object"
-        ? (posting.personal as Record<string, unknown>)
-        : {};
-
-    posting.personal = {
-      ...personal,
-      timezone: payload.timezone,
-    };
-
-    brandConfig.posting = posting;
-  }
-
-  if (typeof payload.defaultGenerationModel === "string") {
-    const imageGen =
-      brandConfig.imageGen && typeof brandConfig.imageGen === "object"
-        ? (brandConfig.imageGen as Record<string, unknown>)
-        : {};
-
-    brandConfig.imageGen = {
-      ...imageGen,
-      model: payload.defaultGenerationModel,
-    };
-  }
-
-  if (typeof payload.defaultPublishingModel === "string") {
-    globalConfig.publishModel = payload.defaultPublishingModel;
-  }
-
-  if (typeof payload.notificationChannel === "string") {
-    globalConfig.notifications = payload.notificationChannel;
-  }
-
-  await Promise.all([
-    writeJsonWithBackup(postizConfigPath, brandConfig),
-    writeJsonWithBackup(globalConfigPath, globalConfig),
-  ]);
-
-  invalidateCache();
-
-  return {
-    ok: true,
-    settings: await getGlobalSettings(),
-  };
-}
-
-function buildStorybookSkeleton(brandId: string, brandName: string) {
-  return {
-    schema_version: "1.0.0",
-    generated_at: new Date().toISOString(),
-    brand: {
-      id: brandId,
-      name: brandName,
-      category: "new_brand",
-      positioning: {
-        for_who: "",
-        primary_pain: "",
-        promise: "",
-        differentiation: [],
-        proof_points: [],
-      },
-    },
-    voice: {
-      tone_sliders: {
-        confident: 0.6,
-        playful: 0.2,
-        luxurious: 0.1,
-        technical: 0.4,
-        empathetic: 0.5,
-      },
-      style_rules: [],
-      vocabulary: {
-        preferred: [],
-        banned: [],
-      },
-    },
-    messaging: {
-      pillars: [],
-      ctas: {
-        primary: [],
-        secondary: [],
-        avoid: [],
-      },
-    },
-  };
-}
-
-export async function createBrand(brandId: string, brandName: string) {
-  const { brandsRoot, draftsRoot, uploadsRoot, scriptsRoot } = getPaths();
-
-  const sanitizedId = brandId.toLowerCase().replace(/[^a-z0-9_]/g, "_");
-  const brandRoot = path.join(brandsRoot, sanitizedId);
-
-  if (await pathExists(brandRoot)) {
-    throw new Error(`Brand '${sanitizedId}' already exists`);
-  }
-
-  await fs.mkdir(path.join(brandRoot, "context", "screenshots"), { recursive: true });
-  await fs.mkdir(path.join(draftsRoot, sanitizedId), { recursive: true });
-  await fs.mkdir(path.join(uploadsRoot, sanitizedId), { recursive: true });
-  await fs.mkdir(path.join(scriptsRoot, sanitizedId), { recursive: true });
-
-  await Promise.all([
-    writeJsonWithBackup(
-      path.join(brandRoot, "storybook.json"),
-      buildStorybookSkeleton(sanitizedId, brandName),
-    ),
-    writeJsonWithBackup(path.join(brandRoot, "hook-rotation.json"), {
-      cooldown_posts: 3,
-      recent_used: [],
-      angles: [],
-    }),
-    fs.writeFile(path.join(brandRoot, "experiments.jsonl"), "", "utf8"),
-  ]);
-
-  invalidateCache();
-
-  return {
-    ok: true,
-    brandId: sanitizedId,
-  };
-}
-
-export async function decommissionBrand(brandId: string) {
-  const storybook = await getStorybook(brandId);
-  if (!storybook) {
-    throw new Error(`Brand '${brandId}' does not exist`);
-  }
-
-  const nextStorybook = {
-    ...storybook,
-    lifecycle: {
-      status: "decommissioned",
-      decommissioned_at: new Date().toISOString(),
-    },
-  };
-
-  await updateStorybook(brandId, nextStorybook);
-  invalidateCache();
-
-  return {
-    ok: true,
-    brandId,
-    status: "decommissioned",
-  };
-}
-
-export async function cloneBrand(sourceBrandId: string, newBrandId: string) {
-  const { brandsRoot } = getPaths();
-  const sourceRoot = path.join(brandsRoot, sourceBrandId);
-  const targetId = newBrandId.toLowerCase().replace(/[^a-z0-9_]/g, "_");
-  const targetRoot = path.join(brandsRoot, targetId);
-
-  if (!(await pathExists(sourceRoot))) {
-    throw new Error(`Source brand '${sourceBrandId}' does not exist`);
-  }
-
-  if (await pathExists(targetRoot)) {
-    throw new Error(`Target brand '${targetId}' already exists`);
-  }
-
-  await fs.mkdir(targetRoot, { recursive: true });
-
-  const filesToClone = ["storybook.json", "hook-rotation.json", "experiments.jsonl"];
-  for (const fileName of filesToClone) {
-    const sourceFile = path.join(sourceRoot, fileName);
-    const targetFile = path.join(targetRoot, fileName);
-    if (await pathExists(sourceFile)) {
-      await fs.copyFile(sourceFile, targetFile);
-    }
-  }
-
-  await fs.mkdir(path.join(targetRoot, "context", "screenshots"), { recursive: true });
-
-  const storybook = await getStorybook(targetId);
-  if (storybook?.brand && typeof storybook.brand === "object") {
-    const brand = storybook.brand as Record<string, unknown>;
-    const updated = {
-      ...storybook,
-      brand: {
-        ...brand,
-        id: targetId,
-        name: typeof brand.name === "string" ? `${brand.name} Clone` : targetId,
-      },
-    };
-
-    await updateStorybook(targetId, updated);
-  }
-
-  invalidateCache();
-
-  return {
-    ok: true,
-    sourceBrandId,
-    brandId: targetId,
   };
 }

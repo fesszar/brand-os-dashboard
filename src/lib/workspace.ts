@@ -6,7 +6,15 @@ import { format } from "date-fns";
 const DEFAULT_WORKSPACE = "/Users/clawdraider/.openclaw/workspace-ozzymandias";
 const CACHE_TTL_MS = 15_000;
 
-const cacheStore = new Map<string, { expires: number; value: unknown }>();
+type CacheStore = Map<string, { expires: number; value: unknown }>;
+
+/**
+ * Next.js bundles route handlers and pages separately, so a module-level Map
+ * would give each bundle its own cache and API writes would not invalidate
+ * what pages read. Keeping the store on globalThis shares it process-wide.
+ */
+const globalCache = globalThis as typeof globalThis & { __brandOsCache?: CacheStore };
+const cacheStore: CacheStore = (globalCache.__brandOsCache ??= new Map());
 
 export type WorkspacePaths = {
   workspace: string;
@@ -226,4 +234,29 @@ export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/**
+ * Appends one JSON object as a line to a .jsonl file, adding a separating
+ * newline first if the file does not already end with one.
+ */
+export async function appendJsonLine(filePath: string, value: unknown) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  let prefix = "";
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const { size } = await handle.stat();
+      if (size > 0) {
+        const last = Buffer.alloc(1);
+        await handle.read(last, 0, 1, size - 1);
+        prefix = last.toString() === "\n" ? "" : "\n";
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    prefix = "";
+  }
+  await fs.appendFile(filePath, `${prefix}${JSON.stringify(value)}\n`, "utf8");
 }

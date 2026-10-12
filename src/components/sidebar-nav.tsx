@@ -7,6 +7,7 @@ import {
   BarChart3,
   CalendarDays,
   Clock3,
+  FlaskConical,
   Flame,
   GalleryHorizontal,
   Home,
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { href: "/pipeline-monitor", label: "Pipeline Monitor", icon: Workflow },
   { href: "/warmup", label: "Warmup", icon: Flame },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/settings", label: "Global Settings", icon: Activity },
 ];
 
