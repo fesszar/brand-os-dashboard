@@ -20,6 +20,17 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Testing
+
+```bash
+npm test          # Vitest unit tests (src/**/*.test.ts)
+npm run test:e2e  # Playwright e2e against src/tests/fixtures/workspace
+```
+
+The e2e run copies the fixture workspace to a temp dir, points `WORKSPACE` at it and
+puts a fake `openclaw` CLI (`src/tests/fixtures/bin`) on `PATH`. To use a preinstalled
+Chromium instead of Playwright's download, set `PW_CHROMIUM_PATH`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

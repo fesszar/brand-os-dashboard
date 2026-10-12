@@ -1,0 +1,6 @@
+[
+  {"id":"inv-publish","name":"invoicerate publish","schedule":"0 9,13 * * *","enabled":true,"last_status":"ok","last_run":"2026-02-12T09:00:00Z","next_run":"2026-02-12T13:00:00Z","runs":[{"at":"2026-02-12T09:00:00Z","status":"ok"},{"at":"2026-02-11T13:00:00Z","status":"ok"}]},
+  {"id":"inv-generate","name":"invoicerate generate drafts","schedule":"30 6 * * *","enabled":true,"last_status":"error","runs":[{"at":"2026-02-12T06:30:00Z","status":"error","error":"model timeout"},{"at":"2026-02-11T06:30:00Z","status":"ok"}]},
+  {"id":"fb-warmup","name":"fessburn warmup","schedule":{"kind":"cron","expr":"*/45 * * * *"},"enabled":true,"state":{"lastStatus":"error","consecutiveErrors":3,"lastRunAtMs":1770887400000}},
+  {"id":"analytics-ingest","name":"analytics ingest","schedule":"0 2 * * *","enabled":false,"last_status":"ok"}
+]

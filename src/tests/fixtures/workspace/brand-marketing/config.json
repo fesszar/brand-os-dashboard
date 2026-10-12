@@ -1,0 +1,9 @@
+{
+  "postiz": {
+    "apiKey": "pz_live_fixture_key_4242",
+    "baseUrl": "http://127.0.0.1:9",
+    "invoicerate": { "tiktok": "int-tt-001", "instagram": "int-ig-002" },
+    "fessburn": { "tiktok": "int-tt-101" }
+  },
+  "posting": { "invoicerate": { "schedule": ["0900", "1300"] } }
+}

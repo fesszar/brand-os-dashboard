@@ -7,6 +7,7 @@ import {
   BarChart3,
   CalendarDays,
   Clock3,
+  Flame,
   GalleryHorizontal,
   Home,
   Megaphone,
@@ -30,6 +31,7 @@ const NAV_ITEMS = [
   { href: "/platform-settings", label: "Platform Settings", icon: Settings },
   { href: "/cron-manager", label: "Cron Manager", icon: Clock3 },
   { href: "/pipeline-monitor", label: "Pipeline Monitor", icon: Workflow },
+  { href: "/warmup", label: "Warmup", icon: Flame },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/settings", label: "Global Settings", icon: Activity },
 ];

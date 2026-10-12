@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run --config src/vitest.config.ts",
+    "test:e2e": "playwright test --config src/playwright.config.ts"
   },
   "dependencies": {
     "@vitest/ui": "^4.0.18",

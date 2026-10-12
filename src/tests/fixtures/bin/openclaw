@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// Fake OpenClaw CLI for e2e tests. Reads/writes $WORKSPACE/openclaw-crons.json.
+const fs = require("node:fs");
+const path = require("node:path");
+
+const file = path.join(process.env.WORKSPACE || ".", "openclaw-crons.json");
+const jobs = JSON.parse(fs.readFileSync(file, "utf8"));
+const [group, command, id] = process.argv.slice(2);
+
+if (group !== "cron") process.exit(2);
+if (command === "list") {
+  process.stdout.write(JSON.stringify(jobs));
+} else if (command === "run" || command === "enable" || command === "disable") {
+  const job = jobs.find((entry) => entry.id === id);
+  if (!job) {
+    process.stderr.write(`unknown job ${id}\n`);
+    process.exit(1);
+  }
+  if (command === "run") {
+    job.runs = [{ at: new Date().toISOString(), status: "ok" }, ...(job.runs || [])];
+    job.last_status = "ok";
+    job.last_run = job.runs[0].at;
+  } else {
+    job.enabled = command === "enable";
+  }
+  fs.writeFileSync(file, JSON.stringify(jobs, null, 2));
+  process.stdout.write(`${command} ${id} ok\n`);
+} else {
+  process.exit(2);
+}

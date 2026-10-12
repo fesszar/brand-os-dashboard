@@ -88,9 +88,29 @@ export type PublishEntry = {
   ok: boolean;
   slot: string;
   captionPreview?: string;
+  captions: Record<string, string>;
+  failedTargets: string[];
   postizPostIds: string[];
+  slotDir: string;
+  reportFile: string;
   reportPath: string;
 };
+
+export type PublishFilters = {
+  brandId?: string;
+  platform?: string;
+  contentType?: string;
+  from?: string;
+  to?: string;
+};
+
+export type CronRun = {
+  at: string;
+  status: "ok" | "failed" | "unknown";
+  message?: string;
+};
+
+export type CronHealth = "green" | "yellow" | "red" | "grey";
 
 export type CronEntry = {
   id: string;
@@ -101,6 +121,48 @@ export type CronEntry = {
   lastStatus: "ok" | "failed" | "unknown";
   enabled: boolean;
   group?: string;
+  brandId?: string;
+  jobType?: string;
+  scheduleText?: string;
+  consecutiveFailures?: number;
+  recentRuns?: CronRun[];
+  health?: CronHealth;
+};
+
+export type StageStatus = "ok" | "warning" | "error" | "idle";
+
+export type PipelineStage = {
+  name: "Generate" | "Draft" | "Publish" | "Analytics";
+  value: number;
+  status: StageStatus;
+  detail: string;
+  lastAt: string | null;
+};
+
+export type PipelineAlert = {
+  severity: "warning" | "error";
+  message: string;
+};
+
+export type PipelineBrand = {
+  brandId: string;
+  stages: PipelineStage[];
+  alerts: PipelineAlert[];
+};
+
+export type WarmupPlatformStatus = {
+  platform: string;
+  lastWarmupAt: string | null;
+  count: number;
+};
+
+export type WarmupBrandStatus = {
+  brandId: string;
+  lastWarmupAt: string | null;
+  status: "ok" | "stale" | "unknown";
+  platforms: WarmupPlatformStatus[];
+  hourHistogram: number[];
+  cronId: string | null;
 };
 
 export type ExperimentEntry = {

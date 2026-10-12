@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { BrandCalendarTab } from "@/components/brand/brand-calendar-tab";
 import { BrandDraftsTab } from "@/components/brand/brand-drafts-tab";
@@ -9,10 +8,13 @@ import { BrandOverviewTab } from "@/components/brand/brand-overview-tab";
 import { BrandScriptsTab } from "@/components/brand/brand-scripts-tab";
 import { BrandUploadsTab } from "@/components/brand/brand-uploads-tab";
 import type { BrandCalendarItem } from "@/components/brand/types";
+import { NoticeBanner } from "@/components/notice-banner";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { requestJson } from "@/lib/request-json";
 import type { DraftEntry, PublishEntry, ScriptEntry, UploadEntry } from "@/lib/types";
 
 type BrandWorkspaceTabsProps = {
@@ -28,28 +30,6 @@ type BrandWorkspaceTabsProps = {
   integrations: Record<string, string>;
 };
 
-async function requestJson(url: string, init?: RequestInit) {
-  const isFormData = init?.body instanceof FormData;
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(init?.headers || {}),
-    },
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as {
-    message?: string;
-    [key: string]: unknown;
-  };
-
-  if (!response.ok) {
-    throw new Error(payload.message || `Request failed (${response.status})`);
-  }
-
-  return payload;
-}
-
 export function BrandWorkspaceTabs({
   brandId,
   brandName,
@@ -62,33 +42,12 @@ export function BrandWorkspaceTabs({
   publishHistory,
   integrations,
 }: BrandWorkspaceTabsProps) {
-  const router = useRouter();
-
-  const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const { isBusy, notice, setNotice, run: runAction } = useAsyncAction();
   const [editingDraft, setEditingDraft] = useState<DraftEntry | null>(null);
   const [captionDraft, setCaptionDraft] = useState<Record<string, string>>({});
   const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
 
   const publishedCount = publishHistory.filter((entry) => entry.ok).length;
-
-  /**
-   * Wraps async API actions with shared busy/error/refresh handling.
-   */
-  async function runAction(actionId: string, task: () => Promise<void>) {
-    setBusyAction(actionId);
-    setNotice(null);
-
-    try {
-      await task();
-      router.refresh();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Request failed";
-      setNotice({ kind: "error", text: message });
-    } finally {
-      setBusyAction(null);
-    }
-  }
 
   /**
    * Opens draft caption editor with current caption values.
@@ -150,21 +109,9 @@ export function BrandWorkspaceTabs({
     });
   }
 
-  const isBusy = busyAction !== null;
-
   return (
     <div className="space-y-4">
-      {notice ? (
-        <div
-          className={`rounded-lg border px-3 py-2 text-sm ${
-            notice.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-              : "border-rose-500/40 bg-rose-500/10 text-rose-200"
-          }`}
-        >
-          {notice.text}
-        </div>
-      ) : null}
+      <NoticeBanner notice={notice} />
 
       <Tabs defaultValue="overview">
         <TabsList className="flex h-auto flex-wrap gap-1">

@@ -1,0 +1,4 @@
+{"logged_at":"2026-02-12T09:10:00Z","brand_id":"fessburn","channel_id":"tiktok","source":"warmup","metric":"session"}
+{"logged_at":"2026-02-11T21:40:00Z","brand_id":"fessburn","channel_id":"instagram","source":"warmup","metric":"session"}
+{"logged_at":"2026-02-11T09:55:00Z","brand_id":"fessburn","channel_id":"tiktok","source":"warmup","metric":"session"}
+{"logged_at":"2026-02-12T11:00:00Z","brand_id":"fessburn","channel_id":"tiktok","source":"analytics","aggregate":{"views":1200,"engagement_rate":0.05}}

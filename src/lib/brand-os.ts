@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import { addDays, format, isAfter, parseISO } from "date-fns";
 
@@ -9,19 +7,31 @@ import type {
   ActivityEntry,
   BrandCard,
   BrandStatus,
-  CronEntry,
   DraftEntry,
   ExperimentEntry,
   HealthSummary,
-  PublishEntry,
   ScriptEntry,
   UploadEntry,
 } from "@/lib/types";
+import { listPublishHistory } from "@/lib/publishing";
+import {
+  getPaths,
+  invalidateCache,
+  listDirectories,
+  listFiles,
+  listFilesRecursive,
+  parseSlotDir,
+  pathExists,
+  readJsonFile,
+  readJsonLines,
+  sortByTimestampDesc,
+  toRelativeWorkspacePath,
+  withCache,
+  writeJsonWithBackup,
+  writeTextWithBackup,
+} from "@/lib/workspace";
 
-const execFileAsync = promisify(execFile);
-const DEFAULT_WORKSPACE =
-  "/Users/clawdraider/.openclaw/workspace-ozzymandias";
-const CACHE_TTL_MS = 15_000;
+export { invalidateCache, listPublishHistory };
 
 const ACTIVE_BRANDS = new Set([
   "invoicerate",
@@ -30,184 +40,6 @@ const ACTIVE_BRANDS = new Set([
   "relaystack",
 ]);
 const DECOMMISSIONED_BRANDS = new Set(["rottenswamp"]);
-
-const cacheStore = new Map<string, { expires: number; value: unknown }>();
-
-type WorkspacePaths = {
-  workspace: string;
-  brandsRoot: string;
-  draftsRoot: string;
-  uploadsRoot: string;
-  scriptsRoot: string;
-  postizConfigPath: string;
-  globalConfigPath: string;
-  cronStatePath: string;
-};
-
-function getPaths(): WorkspacePaths {
-  const workspace = process.env.WORKSPACE || DEFAULT_WORKSPACE;
-
-  return {
-    workspace,
-    brandsRoot: path.join(workspace, "skills", "brand-os", "brands"),
-    draftsRoot: path.join(workspace, "brand-marketing", "drafts"),
-    uploadsRoot: path.join(workspace, "brand-marketing", "uploads"),
-    scriptsRoot: path.join(workspace, "brand-marketing", "scripts"),
-    postizConfigPath: path.join(workspace, "brand-marketing", "config.json"),
-    globalConfigPath: path.join(workspace, "tiktok-marketing", "config.json"),
-    cronStatePath: path.join(workspace, "brand-marketing", ".dashboard-crons.json"),
-  };
-}
-
-async function withCache<T>(
-  key: string,
-  load: () => Promise<T>,
-  ttlMs = CACHE_TTL_MS,
-): Promise<T> {
-  const cached = cacheStore.get(key);
-  const now = Date.now();
-
-  if (cached && cached.expires > now) {
-    return cached.value as T;
-  }
-
-  const value = await load();
-  cacheStore.set(key, { expires: now + ttlMs, value });
-  return value;
-}
-
-export function invalidateCache(prefix?: string) {
-  if (!prefix) {
-    cacheStore.clear();
-    return;
-  }
-
-  for (const key of cacheStore.keys()) {
-    if (key.startsWith(prefix)) {
-      cacheStore.delete(key);
-    }
-  }
-}
-
-async function pathExists(targetPath: string) {
-  try {
-    await fs.access(targetPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJsonWithBackup(filePath: string, value: unknown) {
-  const serialized = `${JSON.stringify(value, null, 2)}\n`;
-  const parent = path.dirname(filePath);
-
-  await fs.mkdir(parent, { recursive: true });
-
-  if (await pathExists(filePath)) {
-    const stamp = format(new Date(), "yyyyMMdd-HHmmss");
-    const backupPath = `${filePath}.bak-${stamp}`;
-    await fs.copyFile(filePath, backupPath);
-  }
-
-  await fs.writeFile(filePath, serialized, "utf8");
-}
-
-async function writeTextWithBackup(filePath: string, value: string) {
-  const parent = path.dirname(filePath);
-  await fs.mkdir(parent, { recursive: true });
-
-  if (await pathExists(filePath)) {
-    const stamp = format(new Date(), "yyyyMMdd-HHmmss");
-    const backupPath = `${filePath}.bak-${stamp}`;
-    await fs.copyFile(filePath, backupPath);
-  }
-
-  await fs.writeFile(filePath, value, "utf8");
-}
-
-async function readJsonLines<T>(filePath: string): Promise<T[]> {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as T);
-  } catch {
-    return [];
-  }
-}
-
-async function listDirectories(root: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(root, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort((a, b) => a.localeCompare(b));
-  } catch {
-    return [];
-  }
-}
-
-async function listFiles(root: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(root, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile())
-      .map((entry) => entry.name)
-      .sort((a, b) => a.localeCompare(b));
-  } catch {
-    return [];
-  }
-}
-
-async function listFilesRecursive(root: string, matcher?: RegExp): Promise<string[]> {
-  const files: string[] = [];
-
-  async function walk(currentPath: string) {
-    let entries;
-    try {
-      entries = await fs.readdir(currentPath, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      const absolute = path.join(currentPath, entry.name);
-      if (entry.isDirectory()) {
-        await walk(absolute);
-        continue;
-      }
-
-      const relative = path.relative(root, absolute);
-      if (!matcher || matcher.test(entry.name) || matcher.test(relative)) {
-        files.push(absolute);
-      }
-    }
-  }
-
-  await walk(root);
-  return files;
-}
-
-function parseSlotDir(slotDir: string) {
-  const match = slotDir.match(/^(\d{4}-\d{2}-\d{2})-(\d{4})$/);
-  return {
-    date: match?.[1] ?? "",
-    slot: match?.[2] ?? "",
-  };
-}
 
 function inferBrandStatus(brandId: string): BrandStatus {
   if (ACTIVE_BRANDS.has(brandId)) {
@@ -219,18 +51,6 @@ function inferBrandStatus(brandId: string): BrandStatus {
   }
 
   return "inactive";
-}
-
-function sortByTimestampDesc<T extends { timestamp: string }>(items: T[]) {
-  return items.sort((a, b) => {
-    const aTime = Date.parse(a.timestamp) || 0;
-    const bTime = Date.parse(b.timestamp) || 0;
-    return bTime - aTime;
-  });
-}
-
-function toRelativeWorkspacePath(absolutePath: string) {
-  return path.relative(getPaths().workspace, absolutePath);
 }
 
 export async function getBrandIds(): Promise<string[]> {
@@ -1078,64 +898,6 @@ export async function deleteUpload(brandId: string, filename: string) {
   };
 }
 
-export async function listPublishHistory(): Promise<PublishEntry[]> {
-  const { draftsRoot } = getPaths();
-
-  const reportFiles = await listFilesRecursive(draftsRoot, /^publish-result-.*\.json$/);
-  const entries = await Promise.all(
-    reportFiles.map(async (reportPath) => {
-      const payload = await readJsonFile<Record<string, unknown>>(reportPath, {});
-      if (!Object.keys(payload).length) {
-        return null;
-      }
-
-      const brandId =
-        typeof payload.brand_id === "string"
-          ? payload.brand_id
-          : path.basename(path.dirname(path.dirname(reportPath)));
-      const date = typeof payload.date === "string" ? payload.date : "unknown";
-      const slot = typeof payload.slot === "string" ? payload.slot : "0000";
-      const time = `${slot.slice(0, 2)}:${slot.slice(2)}`;
-      const postedTargets = Array.isArray(payload.posted_targets)
-        ? (payload.posted_targets as string[])
-        : [];
-
-      const postizResponse = Array.isArray(payload.postiz_response)
-        ? payload.postiz_response
-        : [];
-      const postizPostIds = postizResponse
-        .map((entry) =>
-          entry && typeof entry === "object"
-            ? ((entry as Record<string, unknown>).postId as string | undefined)
-            : undefined,
-        )
-        .filter((value): value is string => Boolean(value));
-
-      return {
-        id: `${brandId}-${slot}-${path.basename(reportPath)}`,
-        brandId,
-        date,
-        time,
-        contentType:
-          typeof payload.content_type === "string" ? payload.content_type : "ai_slideshow",
-        postedTargets,
-        ok: Boolean(payload.ok),
-        slot,
-        postizPostIds,
-        reportPath: toRelativeWorkspacePath(reportPath),
-      } satisfies PublishEntry;
-    }),
-  );
-
-  return entries
-    .filter((entry): entry is PublishEntry => Boolean(entry))
-    .sort((a, b) => {
-      const aTs = Date.parse(`${a.date}T${a.time}:00`) || 0;
-      const bTs = Date.parse(`${b.date}T${b.time}:00`) || 0;
-      return bTs - aTs;
-    });
-}
-
 export async function getCalendarItems() {
   const [drafts, scripts] = await Promise.all([listDrafts(), listScripts()]);
 
@@ -1190,176 +952,6 @@ export async function triggerDraftPublish(brandId: string, slotDir: string) {
   };
 }
 
-export async function listCrons(): Promise<{ jobs: CronEntry[]; raw?: unknown; error?: string }> {
-  const { cronStatePath } = getPaths();
-
-  try {
-    const { stdout } = await execFileAsync("openclaw", ["cron", "list", "--json"]);
-    const parsed = JSON.parse(stdout) as unknown;
-
-    let jobs: CronEntry[] = [];
-    if (Array.isArray(parsed)) {
-      jobs = parsed.map((row, index) => {
-        const item = row as Record<string, unknown>;
-        return {
-          id: typeof item.id === "string" ? item.id : `cron-${index}`,
-          name:
-            typeof item.name === "string"
-              ? item.name
-              : typeof item.task === "string"
-                ? item.task
-                : `Cron ${index + 1}`,
-          schedule: typeof item.schedule === "string" ? item.schedule : "unknown",
-          nextRun: typeof item.next_run === "string" ? item.next_run : undefined,
-          lastRun: typeof item.last_run === "string" ? item.last_run : undefined,
-          lastStatus:
-            typeof item.last_status === "string"
-              ? item.last_status.includes("fail")
-                ? "failed"
-                : "ok"
-              : "unknown",
-          enabled: Boolean(item.enabled ?? true),
-          group: typeof item.group === "string" ? item.group : undefined,
-        } satisfies CronEntry;
-      });
-    }
-
-    await writeJsonWithBackup(cronStatePath, jobs);
-    return { jobs, raw: parsed };
-  } catch (error) {
-    const fallback = await readJsonFile<CronEntry[]>(cronStatePath, []);
-    return {
-      jobs: fallback,
-      error: error instanceof Error ? error.message : "Unable to list crons",
-    };
-  }
-}
-
-export async function runCron(id: string) {
-  try {
-    const { stdout } = await execFileAsync("openclaw", ["cron", "run", id]);
-    return { ok: true, id, output: stdout.trim() };
-  } catch (error) {
-    return {
-      ok: false,
-      id,
-      error: error instanceof Error ? error.message : "failed to run cron",
-    };
-  }
-}
-
-export async function toggleCron(id: string, enabled: boolean) {
-  const list = await listCrons();
-  const updated = list.jobs.map((job) =>
-    job.id === id
-      ? {
-          ...job,
-          enabled,
-        }
-      : job,
-  );
-
-  await writeJsonWithBackup(getPaths().cronStatePath, updated);
-
-  return {
-    ok: true,
-    id,
-    enabled,
-    note: "State stored in dashboard fallback file. Wire to openclaw cron enable/disable command when exposed.",
-  };
-}
-
-export async function getPipelineMonitor() {
-  const [drafts, publishes, experiments] = await Promise.all([
-    listDrafts(),
-    listPublishHistory(),
-    listExperiments(),
-  ]);
-
-  const brands = await getBrandIds();
-
-  return brands.map((brandId) => {
-    const draftCount = drafts.filter((draft) => draft.brandId === brandId).length;
-    const publishedCount = publishes.filter((post) => post.brandId === brandId).length;
-    const analyticsCount = experiments.filter((entry) => entry.brand_id === brandId).length;
-
-    return {
-      brandId,
-      stages: [
-        {
-          name: "Generate",
-          value: draftCount,
-          status: draftCount > 0 ? "ok" : "warning",
-        },
-        {
-          name: "Draft",
-          value: draftCount,
-          status: draftCount > 0 ? "ok" : "warning",
-        },
-        {
-          name: "Publish",
-          value: publishedCount,
-          status: publishedCount > 0 ? "ok" : "warning",
-        },
-        {
-          name: "Analytics",
-          value: analyticsCount,
-          status: analyticsCount > 0 ? "ok" : "warning",
-        },
-      ],
-      alerts: [
-        draftCount === 0 ? "No drafts queued" : null,
-        publishedCount === 0 ? "No publish records" : null,
-      ].filter((value): value is string => Boolean(value)),
-    };
-  });
-}
-
-export async function getWarmupStatus() {
-  const experiments = await listExperiments();
-  const brands = await getBrandIds();
-
-  return brands.map((brandId) => {
-    const brandRows = experiments.filter(
-      (entry) => entry.brand_id === brandId && String(entry.source).includes("warmup"),
-    );
-    const latest = brandRows[0];
-
-    return {
-      brandId,
-      lastWarmupAt:
-        typeof latest?.logged_at === "string" ? latest.logged_at : null,
-      status: latest ? "ok" : "unknown",
-      pattern: latest?.metric ?? "N/A",
-    };
-  });
-}
-
-export async function getPlatformSettings() {
-  const config = await readJsonFile<Record<string, unknown>>(getPaths().postizConfigPath, {});
-  const postiz =
-    config.postiz && typeof config.postiz === "object"
-      ? (config.postiz as Record<string, unknown>)
-      : {};
-  const posting =
-    config.posting && typeof config.posting === "object"
-      ? (config.posting as Record<string, unknown>)
-      : {};
-
-  const brandIds = await getBrandIds();
-
-  return brandIds.map((brandId) => ({
-    brandId,
-    posting:
-      posting[brandId] && typeof posting[brandId] === "object"
-        ? posting[brandId]
-        : {},
-    integrations:
-      postiz[brandId] && typeof postiz[brandId] === "object"
-        ? postiz[brandId]
-        : {},
-  }));
-}
 
 export async function getCrossBrandAnalytics() {
   const [brands, experiments] = await Promise.all([getBrandList(), listExperiments()]);

@@ -29,3 +29,10 @@ export function isValidSlotDir(value: string) {
 export function isValidFileName(value: string) {
   return FILE_PATTERN.test(value) && !value.includes("..") && !value.includes("/") && !value.includes("\\");
 }
+
+/**
+ * Validates an OpenClaw cron job id passed as a CLI argument.
+ */
+export function isValidCronId(value: string) {
+  return SEGMENT_PATTERN.test(value);
+}
